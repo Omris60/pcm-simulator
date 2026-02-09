@@ -5,10 +5,14 @@ Database of Phase Change Materials with Hot/Cold categories
 and proper charging/discharging logic.
 """
 
+import json
+import os
 import numpy as np
 from dataclasses import dataclass
 from typing import Tuple, List, Dict, Optional
 from enum import Enum
+
+_CUSTOM_LIBRARY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "custom_pcm_library.json")
 
 
 class PCMCategory(Enum):
@@ -281,6 +285,7 @@ class PCMMaterialLibrary:
     def __init__(self):
         self._materials: Dict[str, PCMMaterial] = {}
         self._load_default_materials()
+        self._load_custom_materials()
 
     def _load_default_materials(self):
         """Load default PCM materials into library"""
@@ -364,8 +369,83 @@ class PCMMaterialLibrary:
         return {name: mat for name, mat in self._materials.items() if mat.category == category}
 
     def add_custom_material(self, material: PCMMaterial) -> None:
-        """Add a custom material to the library"""
+        """Add a custom material to the library (in-memory only)"""
         self._materials[material.name] = material
+
+    def save_custom_material(self, material: PCMMaterial) -> None:
+        """Save a custom material to the library and persist to disk"""
+        self._materials[material.name] = material
+        self._save_custom_material_to_disk(material)
+
+    def remove_custom_material(self, name: str) -> None:
+        """Remove a custom material from the library and disk"""
+        if name in self._materials:
+            del self._materials[name]
+        custom_data = self._read_custom_file()
+        if name in custom_data:
+            del custom_data[name]
+            self._write_custom_file(custom_data)
+
+    def list_custom_materials(self) -> List[str]:
+        """List names of custom (user-saved) materials"""
+        custom_data = self._read_custom_file()
+        return list(custom_data.keys())
+
+    # --- Persistence helpers ---
+
+    @staticmethod
+    def _read_custom_file() -> Dict:
+        if not os.path.exists(_CUSTOM_LIBRARY_PATH):
+            return {}
+        with open(_CUSTOM_LIBRARY_PATH, 'r') as f:
+            return json.load(f)
+
+    @staticmethod
+    def _write_custom_file(data: Dict) -> None:
+        with open(_CUSTOM_LIBRARY_PATH, 'w') as f:
+            json.dump(data, f, indent=2)
+
+    def _save_custom_material_to_disk(self, material: PCMMaterial) -> None:
+        custom_data = self._read_custom_file()
+        custom_data[material.name] = {
+            "category": material.category.value,
+            "melting_range": list(material.melting_range),
+            "rho_solid": material.rho_solid,
+            "rho_liquid": material.rho_liquid,
+            "k_solid": material.k_solid,
+            "k_liquid": material.k_liquid,
+            "cp_sensible": material.cp_sensible,
+            "description": material.description,
+            "enthalpy": {
+                "temperatures": material.enthalpy_data.temperatures.tolist(),
+                "dH_melting": material.enthalpy_data.dH_melting.tolist(),
+                "dH_solidifying": material.enthalpy_data.dH_solidifying.tolist(),
+                "cp_sensible": material.enthalpy_data.cp_sensible
+            }
+        }
+        self._write_custom_file(custom_data)
+
+    def _load_custom_materials(self) -> None:
+        custom_data = self._read_custom_file()
+        for name, props in custom_data.items():
+            enthalpy = EnthalpyData(
+                temperatures=np.array(props["enthalpy"]["temperatures"], dtype=float),
+                dH_melting=np.array(props["enthalpy"]["dH_melting"], dtype=float),
+                dH_solidifying=np.array(props["enthalpy"]["dH_solidifying"], dtype=float),
+                cp_sensible=props["enthalpy"]["cp_sensible"]
+            )
+            self._materials[name] = PCMMaterial(
+                name=name,
+                category=PCMCategory(props["category"]),
+                melting_range=tuple(props["melting_range"]),
+                rho_solid=props["rho_solid"],
+                rho_liquid=props["rho_liquid"],
+                k_solid=props["k_solid"],
+                k_liquid=props["k_liquid"],
+                cp_sensible=props["cp_sensible"],
+                enthalpy_data=enthalpy,
+                description=props.get("description", "")
+            )
 
     def get_material_info(self, name: str) -> Dict:
         """Get material properties as a dictionary for display"""

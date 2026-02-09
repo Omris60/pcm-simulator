@@ -249,10 +249,14 @@ class PCMHeatExchangerSimulation:
             Nu_water = 0.023 * (Re_water ** 0.8) * (self.water.Pr ** 0.4)
 
         self.h_water = Nu_water * self.water.k / D_in_m
+        self.Re_water = Re_water  # Store for reference
 
         # Thermal resistances (per unit area)
         self.R_water = 1 / self.h_water  # m2K/W
         self.R_wall = self.hex.r_in * np.log(self.hex.r_out / self.hex.r_in) / self.hex.k_tube  # m2K/W
+
+        # Pressure drop calculation (Blasius friction factor)
+        self._calculate_pressure_drop(V_water, D_in_m, Re_water)
 
         # Fin efficiency parameters
         self._calculate_fin_parameters()
@@ -275,6 +279,38 @@ class PCMHeatExchangerSimulation:
         """Calculate what fraction of PCM volume is associated with fin vs tube paths"""
         self.f_vol_fin = self.hex.A_secondary / self.hex.A_total
         self.f_vol_tube = self.hex.A_primary / self.hex.A_total
+
+    def _calculate_pressure_drop(self, V_water: float, D_in_m: float, Re_water: float):
+        """
+        Calculate water-side pressure drop using Blasius friction factor.
+
+        For turbulent flow (Re > 2300): f = 0.316 * Re^(-0.25)
+        For laminar flow (Re < 2300): f = 64 / Re
+
+        Pressure drop: ΔP = f * (L/D) * ρ * V² / 2
+
+        Args:
+            V_water: Water velocity [m/s]
+            D_in_m: Tube inner diameter [m]
+            Re_water: Reynolds number [-]
+        """
+        # Total tube length per flow path [m]
+        L_tube_total_m = self.hex.L_tube_total / 1000
+
+        # Friction factor
+        if Re_water < 2300:
+            # Laminar: Hagen-Poiseuille
+            f = 64 / Re_water if Re_water > 0 else 0
+        else:
+            # Turbulent: Blasius correlation (valid for smooth pipes, Re < 100,000)
+            f = 0.316 * (Re_water ** (-0.25))
+
+        # Pressure drop [Pa]
+        # ΔP = f * (L/D) * ρ * V² / 2
+        self.delta_P_Pa = f * (L_tube_total_m / D_in_m) * self.water.rho * (V_water ** 2) / 2
+        self.delta_P_kPa = self.delta_P_Pa / 1000
+        self.delta_P_bar = self.delta_P_Pa / 100000
+        self.friction_factor = f
 
     def _initialize_state(self):
         """Initialize simulation state based on initial temperature"""
@@ -337,6 +373,9 @@ class PCMHeatExchangerSimulation:
             "Total Capacity (kWh)": f"{E_latent + E_sensible:.2f}",
             "Water Flow (lpm)": f"{self.operating.Q_water_lpm}",
             "h_water (W/m2K)": f"{self.h_water:.1f}",
+            "Re_water": f"{self.Re_water:.0f}",
+            "Pressure Drop (kPa)": f"{self.delta_P_kPa:.1f}",
+            "Pressure Drop (bar)": f"{self.delta_P_bar:.3f}",
         }
 
     def _get_natural_convection_factor(self, delta_liquid: float) -> float:
@@ -424,7 +463,7 @@ class PCMHeatExchangerSimulation:
             R_liquid_tube = np.log(r_max / r_front) / (2 * np.pi * k_pcm_eff)
             R_pcm_tube_raw = R_solid_tube + R_liquid_tube
 
-        L_tube_total = (self.hex.L_tube / 1000) * self.hex.N_tubes_total
+        L_tube_total = (self.hex.L_tube_total / 1000) * self.hex.N_rows
         R_pcm_tube_area = R_pcm_tube_raw / L_tube_total if L_tube_total > 0 else 999999
 
         R_total_tube = self.R_water + self.R_wall + R_pcm_tube_area
@@ -473,10 +512,13 @@ class PCMHeatExchangerSimulation:
             if h_eff > 0 and self.hex.A_secondary > 0:
                 d_delta_fin = E_fin / (self.pcm.rho_liquid * self.hex.A_secondary * h_eff)
 
-                if self.state.mode == SimulationMode.CHARGING:
+                # Use phase to determine direction (not mode)
+                # MELTING = front advances (delta increases)
+                # SOLIDIFYING = front retreats (delta decreases)
+                if self.state.phase == Phase.MELTING:
                     self.state.delta_fin += d_delta_fin
                     self.state.delta_fin = min(self.state.delta_fin, self.hex.delta_max_fin)
-                else:
+                else:  # SOLIDIFYING
                     self.state.delta_fin -= d_delta_fin
                     self.state.delta_fin = max(self.state.delta_fin, 0)
 
@@ -485,21 +527,24 @@ class PCMHeatExchangerSimulation:
             h_eff = dH_dT * 1000
 
             if h_eff > 0:
-                L_tube_total = self.hex.L_tube / 1000 * self.hex.N_tubes_total
+                L_tube_total = (self.hex.L_tube_total / 1000) * self.hex.N_rows
 
                 if self.state.r_front_tube > 0:
                     d_r = E_tube / (self.pcm.rho_liquid * 2 * np.pi * self.state.r_front_tube * L_tube_total * h_eff)
 
-                    if self.state.mode == SimulationMode.CHARGING:
+                    # Use phase to determine direction (not mode)
+                    # MELTING = front advances (r increases)
+                    # SOLIDIFYING = front retreats (r decreases)
+                    if self.state.phase == Phase.MELTING:
                         self.state.r_front_tube += d_r
                         self.state.r_front_tube = min(self.state.r_front_tube, self.hex.r_max_tube)
-                    else:
+                    else:  # SOLIDIFYING
                         self.state.r_front_tube -= d_r
                         self.state.r_front_tube = max(self.state.r_front_tube, self.hex.r_out)
 
         # Update melt fractions
         self.state.f_melted_fin = self.state.delta_fin / self.hex.delta_max_fin
-        self.state.f_melted_tube = (self.state.r_front_tube - self.hex.r_out) / (self.hex.r_max_tube - self.hex.r_out)
+        self.state.f_melted_tube = (self.state.r_front_tube**2 - self.hex.r_out**2) / (self.hex.r_max_tube**2 - self.hex.r_out**2)
 
         self.state.f_melted_total = (self.state.f_melted_fin * self.f_vol_fin +
                                      self.state.f_melted_tube * self.f_vol_tube)
@@ -513,19 +558,39 @@ class PCMHeatExchangerSimulation:
         T_liquidus = self.pcm.T_liquidus
 
         if self.state.mode == SimulationMode.CHARGING:
-            if T < T_solidus:
-                self.state.phase = Phase.FULLY_SOLID
-            elif T > T_liquidus or f >= 0.99:
-                self.state.phase = Phase.FULLY_LIQUID
+            if self.pcm.category == PCMCategory.HOT:
+                # Hot PCM charging = heating/melting
+                if T < T_solidus:
+                    self.state.phase = Phase.FULLY_SOLID
+                elif T > T_liquidus or f >= 0.99:
+                    self.state.phase = Phase.FULLY_LIQUID
+                else:
+                    self.state.phase = Phase.MELTING
             else:
-                self.state.phase = Phase.MELTING
-        else:
-            if T > T_liquidus:
-                self.state.phase = Phase.FULLY_LIQUID
-            elif T < T_solidus or f <= 0.01:
-                self.state.phase = Phase.FULLY_SOLID
+                # Cold PCM charging = cooling/solidifying
+                if T > T_liquidus:
+                    self.state.phase = Phase.FULLY_LIQUID
+                elif T < T_solidus or f <= 0.01:
+                    self.state.phase = Phase.FULLY_SOLID
+                else:
+                    self.state.phase = Phase.SOLIDIFYING
+        else:  # DISCHARGING
+            if self.pcm.category == PCMCategory.HOT:
+                # Hot PCM discharging = cooling/solidifying
+                if T > T_liquidus:
+                    self.state.phase = Phase.FULLY_LIQUID
+                elif T < T_solidus or f <= 0.01:
+                    self.state.phase = Phase.FULLY_SOLID
+                else:
+                    self.state.phase = Phase.SOLIDIFYING
             else:
-                self.state.phase = Phase.SOLIDIFYING
+                # Cold PCM discharging = heating/melting
+                if T < T_solidus:
+                    self.state.phase = Phase.FULLY_SOLID
+                elif T > T_liquidus or f >= 0.99:
+                    self.state.phase = Phase.FULLY_LIQUID
+                else:
+                    self.state.phase = Phase.MELTING
 
     def step(self, mode: SimulationMode) -> SimulationState:
         """Perform one simulation time step"""

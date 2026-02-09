@@ -22,3 +22,10 @@ build/
 .env
 .venv/
 venv/
+
+# Windows artifacts
+nul
+
+# Data files (not part of the app)
+*.xlsx
+*.docx
