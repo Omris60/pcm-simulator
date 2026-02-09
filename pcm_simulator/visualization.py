@@ -12,8 +12,8 @@ import io
 
 
 def create_temperature_plot(data: Dict[str, np.ndarray],
-                           T_water_hot: float,
-                           T_water_cold: float,
+                           T_water_hot: Optional[float] = None,
+                           T_water_cold: Optional[float] = None,
                            title: str = "Temperature vs Time") -> go.Figure:
     """Create temperature vs time plot"""
     fig = go.Figure()
@@ -34,11 +34,33 @@ def create_temperature_plot(data: Dict[str, np.ndarray],
         line=dict(color='red', width=1.5, dash='dash')
     ))
 
-    # Reference lines
-    fig.add_hline(y=T_water_hot, line_dash="dot", line_color="red",
-                  annotation_text="T_hot", annotation_position="right")
-    fig.add_hline(y=T_water_cold, line_dash="dot", line_color="blue",
-                  annotation_text="T_cold", annotation_position="right")
+    # Reference lines (only when constant temperature mode)
+    if T_water_hot is not None:
+        fig.add_hline(y=T_water_hot, line_dash="dot", line_color="red",
+                      annotation_text="T_hot", annotation_position="right")
+    if T_water_cold is not None:
+        fig.add_hline(y=T_water_cold, line_dash="dot", line_color="blue",
+                      annotation_text="T_cold", annotation_position="right")
+
+    # T_water_in trace (for closed-loop mode where it varies)
+    if 'T_water_in_C' in data and np.ptp(data['T_water_in_C']) > 0.01:
+        fig.add_trace(go.Scatter(
+            x=data['time_min'],
+            y=data['T_water_in_C'],
+            mode='lines',
+            name='T_water_in',
+            line=dict(color='orange', width=1.5, dash='dot')
+        ))
+
+    # T_tank trace (for closed-loop mode)
+    if 'T_tank_C' in data and np.any(data['T_tank_C'] != 0):
+        fig.add_trace(go.Scatter(
+            x=data['time_min'],
+            y=data['T_tank_C'],
+            mode='lines',
+            name='T_tank',
+            line=dict(color='green', width=1.5, dash='dashdot')
+        ))
 
     fig.update_layout(
         title=title,
@@ -58,7 +80,7 @@ def create_power_plot(data: Dict[str, np.ndarray],
 
     fig.add_trace(go.Scatter(
         x=data['time_min'],
-        y=data['Q_total_kW'],
+        y=np.abs(data['Q_total_kW']),
         mode='lines',
         name='Q_total',
         line=dict(color='black', width=2)
@@ -66,7 +88,7 @@ def create_power_plot(data: Dict[str, np.ndarray],
 
     fig.add_trace(go.Scatter(
         x=data['time_min'],
-        y=data['Q_fin_kW'],
+        y=np.abs(data['Q_fin_kW']),
         mode='lines',
         name='Q_fin',
         line=dict(color='green', width=1.5, dash='dash')
@@ -74,11 +96,21 @@ def create_power_plot(data: Dict[str, np.ndarray],
 
     fig.add_trace(go.Scatter(
         x=data['time_min'],
-        y=data['Q_tube_kW'],
+        y=np.abs(data['Q_tube_kW']),
         mode='lines',
         name='Q_tube',
         line=dict(color='purple', width=1.5, dash='dot')
     ))
+
+    # Wall heat loss trace (only when non-zero)
+    if 'Q_loss_kW' in data and np.any(data['Q_loss_kW'] != 0):
+        fig.add_trace(go.Scatter(
+            x=data['time_min'],
+            y=np.abs(data['Q_loss_kW']),
+            mode='lines',
+            name='Q_loss (wall)',
+            line=dict(color='brown', width=1.5, dash='dashdot')
+        ))
 
     fig.update_layout(
         title=title,
@@ -193,9 +225,9 @@ def create_enthalpy_plot(data: Dict[str, np.ndarray],
 
 
 def create_combined_dashboard(data: Dict[str, np.ndarray],
-                             T_water_hot: float,
-                             T_water_cold: float,
-                             delta_max_mm: float,
+                             T_water_hot: Optional[float] = None,
+                             T_water_cold: Optional[float] = None,
+                             delta_max_mm: float = 0.0,
                              title: str = "PCM Simulation Results") -> go.Figure:
     """Create combined dashboard with all plots"""
     fig = make_subplots(
@@ -224,17 +256,41 @@ def create_combined_dashboard(data: Dict[str, np.ndarray],
         line=dict(color='red', width=1.5, dash='dash')
     ), row=1, col=1)
 
+    # T_water_in trace (for closed-loop mode)
+    if 'T_water_in_C' in data and np.ptp(data['T_water_in_C']) > 0.01:
+        fig.add_trace(go.Scatter(
+            x=data['time_min'], y=data['T_water_in_C'],
+            mode='lines', name='T_water_in',
+            line=dict(color='orange', width=1.5, dash='dot')
+        ), row=1, col=1)
+
+    # T_tank trace (for closed-loop mode)
+    if 'T_tank_C' in data and np.any(data['T_tank_C'] != 0):
+        fig.add_trace(go.Scatter(
+            x=data['time_min'], y=data['T_tank_C'],
+            mode='lines', name='T_tank',
+            line=dict(color='green', width=1.5, dash='dashdot')
+        ), row=1, col=1)
+
     # Power plot (1,2)
     fig.add_trace(go.Scatter(
-        x=data['time_min'], y=data['Q_total_kW'],
+        x=data['time_min'], y=np.abs(data['Q_total_kW']),
         mode='lines', name='Q_total',
         line=dict(color='black', width=2)
     ), row=1, col=2)
     fig.add_trace(go.Scatter(
-        x=data['time_min'], y=data['Q_fin_kW'],
+        x=data['time_min'], y=np.abs(data['Q_fin_kW']),
         mode='lines', name='Q_fin',
         line=dict(color='green', width=1.5, dash='dash')
     ), row=1, col=2)
+
+    # Wall heat loss trace (only when non-zero)
+    if 'Q_loss_kW' in data and np.any(data['Q_loss_kW'] != 0):
+        fig.add_trace(go.Scatter(
+            x=data['time_min'], y=np.abs(data['Q_loss_kW']),
+            mode='lines', name='Q_loss (wall)',
+            line=dict(color='brown', width=1.5, dash='dashdot')
+        ), row=1, col=2)
 
     # Energy plot (2,1)
     fig.add_trace(go.Scatter(
@@ -287,6 +343,58 @@ def create_combined_dashboard(data: Dict[str, np.ndarray],
     return fig
 
 
+def create_wall_loss_plot(data: Dict[str, np.ndarray],
+                          title: str = "Wall Heat Loss vs Time") -> go.Figure:
+    """Create wall heat loss vs time plot (positive values)"""
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=data['time_min'],
+        y=np.abs(data['Q_loss_kW']),
+        mode='lines',
+        name='Q_loss (wall)',
+        line=dict(color='brown', width=2),
+        fill='tozeroy',
+        fillcolor='rgba(139, 69, 19, 0.2)'
+    ))
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Time (min)",
+        yaxis_title="Wall Heat Loss (kW)",
+        hovermode='x unified'
+    )
+
+    return fig
+
+
+def create_source_power_plot(data: Dict[str, np.ndarray],
+                             title: str = "Source/Sink Power vs Time") -> go.Figure:
+    """Create source/sink power vs time plot (for closed-loop mode)"""
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=data['time_min'],
+        y=data['Q_source_kW'],
+        mode='lines',
+        name='Q_source',
+        line=dict(color='darkorange', width=2),
+        fill='tozeroy',
+        fillcolor='rgba(255, 140, 0, 0.2)'
+    ))
+
+    fig.add_hline(y=0, line_dash="solid", line_color="gray", line_width=0.5)
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Time (min)",
+        yaxis_title="Source Power (kW)",
+        hovermode='x unified'
+    )
+
+    return fig
+
+
 def export_plot_to_png(fig: go.Figure, filename: str, width: int = 1200, height: int = 800) -> bytes:
     """Export plot to PNG bytes"""
     return fig.to_image(format="png", width=width, height=height)
@@ -295,7 +403,7 @@ def export_plot_to_png(fig: go.Figure, filename: str, width: int = 1200, height:
 def export_data_to_csv(data: Dict[str, np.ndarray]) -> str:
     """Export data to CSV string"""
     import pandas as pd
-    df = pd.DataFrame({
+    columns = {
         'Time (s)': data['time_s'],
         'Time (min)': data['time_min'],
         'T_PCM (C)': data['T_pcm_C'],
@@ -308,7 +416,19 @@ def export_data_to_csv(data: Dict[str, np.ndarray]) -> str:
         'Delta_fin (mm)': data['delta_fin_mm'],
         'R_front_tube (mm)': data['r_front_tube_mm'],
         'H_specific (kJ/kg)': data['H_specific_kJ_kg'],
-    })
+    }
+    # Add closed-loop columns when present and non-trivial
+    if 'T_water_in_C' in data and np.ptp(data['T_water_in_C']) > 0.01:
+        columns['T_water_in (C)'] = data['T_water_in_C']
+    if 'T_tank_C' in data and np.any(data['T_tank_C'] != 0):
+        columns['T_tank (C)'] = data['T_tank_C']
+    if 'Q_source_kW' in data and np.any(data['Q_source_kW'] != 0):
+        columns['Q_source (kW)'] = data['Q_source_kW']
+    if 'Q_loss_kW' in data and np.any(data['Q_loss_kW'] != 0):
+        columns['Q_loss (kW)'] = data['Q_loss_kW']
+    if 'E_loss_kWh' in data and np.any(data['E_loss_kWh'] != 0):
+        columns['E_loss (kWh)'] = data['E_loss_kWh']
+    df = pd.DataFrame(columns)
     return df.to_csv(index=False)
 
 

@@ -27,6 +27,7 @@ class Phase(Enum):
     MELTING = "Melting"
     FULLY_LIQUID = "Fully Liquid"
     SOLIDIFYING = "Solidifying"
+    SUPERCOOLED = "Supercooled"
 
 
 class SimulationMode(Enum):
@@ -34,6 +35,18 @@ class SimulationMode(Enum):
     CHARGING = "Charging"
     DISCHARGING = "Discharging"
     IDLE = "Idle"
+
+
+class WaterSupplyMode(Enum):
+    """Water supply modes"""
+    CONSTANT_TEMPERATURE = "Constant Temperature"
+    HEAT_SOURCE_SINK = "Heat Source/Sink"
+
+
+class SourceControlMode(Enum):
+    """Heat source/sink control modes"""
+    CONSTANT_POWER = "Constant Power"
+    THERMOSTAT = "Thermostat"
 
 
 # =============================================================================
@@ -51,11 +64,33 @@ class WaterProperties:
 
 
 @dataclass
+class HeatSourceSinkConfig:
+    """Configuration for heat source/sink closed-loop mode"""
+    power_kW: float = 5.0                                       # Always positive; sign auto-determined
+    tank_volume_L: float = 50.0                                  # Tank volume [L]
+    T_tank_initial: float = 25.0                                 # Initial tank temperature [C]
+    control_mode: SourceControlMode = SourceControlMode.CONSTANT_POWER
+    T_setpoint: float = 60.0                                     # Thermostat setpoint [C]
+
+
+@dataclass
 class OperatingConditions:
     """Operating conditions"""
     Q_water_lpm: float       # Water flow rate [lpm]
     T_water_hot: float       # Hot water temperature [C]
     T_water_cold: float      # Cold water temperature [C]
+    water_supply_mode: WaterSupplyMode = WaterSupplyMode.CONSTANT_TEMPERATURE
+    heat_source_config: Optional[HeatSourceSinkConfig] = None
+
+
+@dataclass
+class WallLossConfig:
+    """Configuration for tank wall heat loss to ambient"""
+    enabled: bool = False
+    T_ambient: float = 25.0            # [°C]
+    wall_thickness_mm: float = 2.0     # [mm]
+    k_wall: float = 50.0               # Wall conductivity [W/(m·K)]
+    h_ext: float = 10.0                # External convection [W/(m²·K)]
 
 
 @dataclass
@@ -66,6 +101,8 @@ class SimulationConfig:
     T_pcm_initial: float = 40.0        # Initial PCM temperature [C]
     convergence_tol: float = 0.001     # Convergence tolerance
     max_iterations: int = 50           # Maximum iterations
+    supercooling_deg: float = 0.0      # Degrees below T_liquidus before nucleation
+    wall_loss: Optional[WallLossConfig] = None
 
 
 @dataclass
@@ -98,10 +135,24 @@ class SimulationState:
     # Cumulative energy
     E_total: float = 0.0               # Cumulative energy [kJ]
 
+    # Wall heat loss
+    Q_loss: float = 0.0                # Wall heat loss rate [W]
+    E_loss: float = 0.0                # Cumulative wall loss energy [kJ]
+
     # Phase and mode
     phase: Phase = Phase.FULLY_SOLID
     mode: SimulationMode = SimulationMode.IDLE
     curve: str = 'melting'             # Which enthalpy curve to use
+
+    # Closed-loop water mode
+    T_water_in: float = 0.0    # Water inlet temp to HEX (varies in closed-loop mode)
+    T_tank: float = 0.0        # Tank temperature
+    Q_source: float = 0.0      # Heat source/sink power this step [W] (signed)
+
+    # Supercooling tracking
+    is_supercooled: bool = False
+    H_supercool_start: float = 0.0    # Enthalpy when supercooling began [kJ/kg]
+    T_supercool_start: float = 0.0    # Temperature when supercooling began [C]
 
 
 @dataclass
@@ -119,6 +170,11 @@ class SimulationResults:
     r_front_tube: List[float] = field(default_factory=list)
     phase: List[str] = field(default_factory=list)
     H_specific: List[float] = field(default_factory=list)
+    T_water_in: List[float] = field(default_factory=list)
+    T_tank: List[float] = field(default_factory=list)
+    Q_source_kW: List[float] = field(default_factory=list)
+    Q_loss: List[float] = field(default_factory=list)
+    E_loss: List[float] = field(default_factory=list)
 
     def record(self, state: SimulationState):
         """Record current state"""
@@ -134,6 +190,11 @@ class SimulationResults:
         self.r_front_tube.append(state.r_front_tube * 1000)  # Convert to mm
         self.phase.append(state.phase.value)
         self.H_specific.append(state.H_pcm_specific)
+        self.T_water_in.append(state.T_water_in)
+        self.T_tank.append(state.T_tank)
+        self.Q_source_kW.append(state.Q_source / 1000)
+        self.Q_loss.append(state.Q_loss / 1000)       # Convert to kW
+        self.E_loss.append(state.E_loss / 3600)        # Convert to kWh
 
     def to_numpy(self) -> Dict[str, np.ndarray]:
         """Convert to numpy arrays"""
@@ -150,13 +211,18 @@ class SimulationResults:
             'delta_fin_mm': np.array(self.delta_fin),
             'r_front_tube_mm': np.array(self.r_front_tube),
             'H_specific_kJ_kg': np.array(self.H_specific),
+            'T_water_in_C': np.array(self.T_water_in),
+            'T_tank_C': np.array(self.T_tank),
+            'Q_source_kW': np.array(self.Q_source_kW),
+            'Q_loss_kW': np.array(self.Q_loss),
+            'E_loss_kWh': np.array(self.E_loss),
         }
 
     def to_dataframe(self):
         """Convert to pandas DataFrame"""
         import pandas as pd
         data = self.to_numpy()
-        return pd.DataFrame({
+        df = pd.DataFrame({
             'Time (s)': data['time_s'],
             'Time (min)': data['time_min'],
             'T_PCM (C)': data['T_pcm_C'],
@@ -169,7 +235,13 @@ class SimulationResults:
             'Delta_fin (mm)': data['delta_fin_mm'],
             'R_front_tube (mm)': data['r_front_tube_mm'],
             'H_specific (kJ/kg)': data['H_specific_kJ_kg'],
+            'T_water_in (C)': data['T_water_in_C'],
+            'T_tank (C)': data['T_tank_C'],
+            'Q_source (kW)': data['Q_source_kW'],
+            'Q_loss (kW)': data['Q_loss_kW'],
+            'E_loss (kWh)': data['E_loss_kWh'],
         })
+        return df
 
 
 @dataclass
@@ -217,6 +289,11 @@ class PCMHeatExchangerSimulation:
         # Calculate derived quantities
         self._calculate_derived_quantities()
 
+        # Tank mass for closed-loop mode
+        if self.operating.water_supply_mode == WaterSupplyMode.HEAT_SOURCE_SINK:
+            cfg = self.operating.heat_source_config
+            self.m_tank = cfg.tank_volume_L * self.water.rho / 1000  # kg
+
         # Initialize state
         self.state = SimulationState()
         self.results = SimulationResults()
@@ -263,6 +340,16 @@ class PCMHeatExchangerSimulation:
 
         # Volume fractions for fin vs tube paths
         self._calculate_volume_fractions()
+
+        # Wall heat loss UA
+        self._wall_loss_UA = 0.0
+        if self.config.wall_loss and self.config.wall_loss.enabled:
+            wl = self.config.wall_loss
+            R = (wl.wall_thickness_mm / 1000) / wl.k_wall + 1.0 / wl.h_ext
+            self._wall_loss_UA = self.box.surface_area_m2 / R   # W/K
+            self._T_ambient = wl.T_ambient
+        else:
+            self._T_ambient = 25.0
 
     def _calculate_fin_parameters(self):
         """Calculate fin efficiency parameters"""
@@ -356,6 +443,14 @@ class PCMHeatExchangerSimulation:
         self.state.H_pcm_specific = self.pcm.enthalpy_data.get_cumulative_H(T_init, self.state.curve)
         self.state.H_pcm_total = self.state.H_pcm_specific * self.m_pcm
 
+        # Initialize closed-loop water mode fields
+        if self.operating.water_supply_mode == WaterSupplyMode.HEAT_SOURCE_SINK:
+            cfg = self.operating.heat_source_config
+            self.state.T_tank = cfg.T_tank_initial
+            self.state.T_water_in = cfg.T_tank_initial
+        else:
+            self.state.T_water_in = T_init
+
     def get_system_summary(self) -> Dict:
         """Get system summary as dictionary"""
         hex_vol = self.hex.estimate_hex_volume()
@@ -421,7 +516,7 @@ class PCMHeatExchangerSimulation:
         # FIN PATH
         if self.state.phase == Phase.FULLY_SOLID:
             R_pcm_fin = delta_max / self.pcm.k_solid
-        elif self.state.phase == Phase.FULLY_LIQUID:
+        elif self.state.phase in (Phase.FULLY_LIQUID, Phase.SUPERCOOLED):
             R_pcm_fin = delta_max / k_pcm_eff
         elif self.state.phase == Phase.MELTING:
             delta_liquid = max(delta_fin, 1e-9)
@@ -448,7 +543,7 @@ class PCMHeatExchangerSimulation:
 
         if self.state.phase == Phase.FULLY_SOLID:
             R_pcm_tube_raw = np.log(r_max / r_out) / (2 * np.pi * self.pcm.k_solid)
-        elif self.state.phase == Phase.FULLY_LIQUID:
+        elif self.state.phase in (Phase.FULLY_LIQUID, Phase.SUPERCOOLED):
             R_pcm_tube_raw = np.log(r_max / r_out) / (2 * np.pi * k_pcm_eff)
         elif self.state.phase == Phase.MELTING:
             r_front = max(r_front_tube, r_out + 1e-9)
@@ -573,7 +668,15 @@ class PCMHeatExchangerSimulation:
                 elif T < T_solidus or f <= 0.01:
                     self.state.phase = Phase.FULLY_SOLID
                 else:
-                    self.state.phase = Phase.SOLIDIFYING
+                    if self.config.supercooling_deg > 0 and not self.state.is_supercooled and self.state.phase == Phase.FULLY_LIQUID:
+                        self.state.is_supercooled = True
+                        self.state.phase = Phase.SUPERCOOLED
+                        self.state.H_supercool_start = self.state.H_pcm_specific
+                        self.state.T_supercool_start = self.state.T_pcm
+                    elif self.state.is_supercooled:
+                        self.state.phase = Phase.SUPERCOOLED
+                    else:
+                        self.state.phase = Phase.SOLIDIFYING
         else:  # DISCHARGING
             if self.pcm.category == PCMCategory.HOT:
                 # Hot PCM discharging = cooling/solidifying
@@ -582,7 +685,15 @@ class PCMHeatExchangerSimulation:
                 elif T < T_solidus or f <= 0.01:
                     self.state.phase = Phase.FULLY_SOLID
                 else:
-                    self.state.phase = Phase.SOLIDIFYING
+                    if self.config.supercooling_deg > 0 and not self.state.is_supercooled and self.state.phase == Phase.FULLY_LIQUID:
+                        self.state.is_supercooled = True
+                        self.state.phase = Phase.SUPERCOOLED
+                        self.state.H_supercool_start = self.state.H_pcm_specific
+                        self.state.T_supercool_start = self.state.T_pcm
+                    elif self.state.is_supercooled:
+                        self.state.phase = Phase.SUPERCOOLED
+                    else:
+                        self.state.phase = Phase.SOLIDIFYING
             else:
                 # Cold PCM discharging = heating/melting
                 if T < T_solidus:
@@ -592,36 +703,115 @@ class PCMHeatExchangerSimulation:
                 else:
                     self.state.phase = Phase.MELTING
 
+    def _calculate_closed_loop_water_in(self, mode: SimulationMode) -> Tuple[float, float]:
+        """
+        Calculate water inlet temperature for heat source/sink closed-loop mode.
+
+        Returns:
+            (T_after_source, Q_source_W): Water temp after source/sink and signed power [W]
+        """
+        cfg = self.operating.heat_source_config
+
+        # Determine sign: +1 = heat source (heating water), -1 = heat sink (cooling water)
+        if mode == SimulationMode.CHARGING:
+            if self.pcm.category == PCMCategory.HOT:
+                sign = 1   # Charging hot PCM needs hot water → heat source
+            else:
+                sign = -1  # Charging cold PCM needs cold water → heat sink
+        else:  # DISCHARGING
+            if self.pcm.category == PCMCategory.HOT:
+                sign = -1  # Discharging hot PCM needs cold water → heat sink
+            else:
+                sign = 1   # Discharging cold PCM needs warm water → heat source
+
+        Q_source_W = sign * cfg.power_kW * 1000
+
+        # Thermostat: proportional VFD control — modulate power to reach T_setpoint
+        if cfg.control_mode == SourceControlMode.THERMOSTAT:
+            Q_needed = self.C_water * (cfg.T_setpoint - self.state.T_tank)
+            Q_max = cfg.power_kW * 1000
+            Q_source_W = max(-Q_max, min(Q_max, Q_needed))
+
+        # Clamp: a sink can only remove heat (Q <= 0), a source can only add (Q >= 0)
+        if sign == -1:
+            Q_source_W = min(Q_source_W, 0.0)
+        else:
+            Q_source_W = max(Q_source_W, 0.0)
+
+        # Temperature after source/sink
+        if self.C_water > 0:
+            T_after_source = self.state.T_tank + Q_source_W / self.C_water
+        else:
+            T_after_source = self.state.T_tank
+
+        # Clamp to physical range
+        T_after_source = max(0.0, min(99.0, T_after_source))
+
+        return T_after_source, Q_source_W
+
+    def _update_tank_temperature(self, T_water_out: float, dt: float):
+        """
+        Update tank temperature based on water returning from HEX.
+        Uses a mixing model: tank temp moves toward returning water temp.
+        """
+        mixing_ratio = self.m_dot_water * dt / self.m_tank
+        self.state.T_tank += mixing_ratio * (T_water_out - self.state.T_tank)
+
     def step(self, mode: SimulationMode) -> SimulationState:
         """Perform one simulation time step"""
         dt = self.config.dt
         self.state.mode = mode
 
-        # Select water inlet temperature and enthalpy curve based on mode and PCM category
-        if mode == SimulationMode.CHARGING:
-            # For Hot PCM: charging = heating with hot water (melting)
-            # For Cold PCM: charging = cooling with cold water (solidifying)
-            if self.pcm.category == PCMCategory.HOT:
-                T_water_in = self.operating.T_water_hot
-                self.state.curve = 'melting'
-            else:  # COLD
-                T_water_in = self.operating.T_water_cold
-                self.state.curve = 'solidifying'
-        elif mode == SimulationMode.DISCHARGING:
-            # For Hot PCM: discharging = cooling with cold water (solidifying)
-            # For Cold PCM: discharging = heating with warm water (melting)
-            if self.pcm.category == PCMCategory.HOT:
-                T_water_in = self.operating.T_water_cold
-                self.state.curve = 'solidifying'
-            else:  # COLD
-                T_water_in = self.operating.T_water_hot
-                self.state.curve = 'melting'
-        else:
+        # Wall heat loss (negative when T_pcm > T_ambient = heat leaves PCM)
+        Q_loss = -self._wall_loss_UA * (self.state.T_pcm - self._T_ambient) if self._wall_loss_UA > 0 else 0.0
+
+        # Handle idle mode
+        if mode == SimulationMode.IDLE:
             self.state.Q_total = 0
             self.state.Q_fin = 0
             self.state.Q_tube = 0
+            self.state.Q_source = 0
+            # Apply wall loss even in idle
+            if Q_loss != 0.0:
+                dH = Q_loss * dt / 1000  # kJ
+                self.state.H_pcm_total += dH
+                self.state.H_pcm_specific = self.state.H_pcm_total / self.m_pcm
+                self.state.T_pcm = self.pcm.enthalpy_data.get_T_from_H(
+                    self.state.H_pcm_specific, self.state.curve)
+                self._update_phase()
+            self.state.Q_loss = Q_loss
+            self.state.E_loss += abs(Q_loss) * dt / 1000  # kJ
             self.state.time += dt
             return self.state
+
+        # Determine enthalpy curve based on mode and PCM category
+        if mode == SimulationMode.CHARGING:
+            if self.pcm.category == PCMCategory.HOT:
+                self.state.curve = 'melting'
+            else:
+                self.state.curve = 'solidifying'
+        else:  # DISCHARGING
+            if self.pcm.category == PCMCategory.HOT:
+                self.state.curve = 'solidifying'
+            else:
+                self.state.curve = 'melting'
+
+        # Select water inlet temperature based on water supply mode
+        if self.operating.water_supply_mode == WaterSupplyMode.HEAT_SOURCE_SINK:
+            T_water_in, Q_source_W = self._calculate_closed_loop_water_in(mode)
+        else:
+            # Constant temperature mode (existing behavior)
+            Q_source_W = 0.0
+            if mode == SimulationMode.CHARGING:
+                if self.pcm.category == PCMCategory.HOT:
+                    T_water_in = self.operating.T_water_hot
+                else:
+                    T_water_in = self.operating.T_water_cold
+            else:  # DISCHARGING
+                if self.pcm.category == PCMCategory.HOT:
+                    T_water_in = self.operating.T_water_cold
+                else:
+                    T_water_in = self.operating.T_water_hot
 
         # Calculate heat transfer
         Q_total, Q_fin, Q_tube, T_water_out = self._calculate_heat_transfer(
@@ -632,39 +822,42 @@ class PCMHeatExchangerSimulation:
         )
 
         # Apply sign convention: positive Q = heat into PCM
-        if mode == SimulationMode.DISCHARGING:
-            if self.pcm.category == PCMCategory.HOT:
-                # Hot PCM discharging: heat OUT of PCM (negative)
-                Q_total = -abs(Q_total)
-                Q_fin = -abs(Q_fin)
-                Q_tube = -abs(Q_tube)
-            else:
-                # Cold PCM discharging: heat INTO PCM (positive, melting)
-                Q_total = abs(Q_total)
-                Q_fin = abs(Q_fin)
-                Q_tube = abs(Q_tube)
-        else:  # CHARGING
-            if self.pcm.category == PCMCategory.HOT:
-                # Hot PCM charging: heat INTO PCM (positive, melting)
-                Q_total = abs(Q_total)
-                Q_fin = abs(Q_fin)
-                Q_tube = abs(Q_tube)
-            else:
-                # Cold PCM charging: heat OUT of PCM (negative, solidifying)
-                Q_total = -abs(Q_total)
-                Q_fin = -abs(Q_fin)
-                Q_tube = -abs(Q_tube)
+        # Use temperature-based sign to handle cases where wall loss
+        # pushes T_pcm past T_water (e.g. discharge with wall loss)
+        if T_water_in > self.state.T_pcm:
+            # Water is hotter → heat flows into PCM
+            Q_total = abs(Q_total)
+            Q_fin = abs(Q_fin)
+            Q_tube = abs(Q_tube)
+        else:
+            # PCM is hotter → heat flows out of PCM
+            Q_total = -abs(Q_total)
+            Q_fin = -abs(Q_fin)
+            Q_tube = -abs(Q_tube)
 
-        # Update enthalpy
-        dH = Q_total * dt / 1000  # kJ
+        # Update enthalpy (includes wall loss)
+        dH = (Q_total + Q_loss) * dt / 1000  # kJ
         self.state.H_pcm_total += dH
         self.state.H_pcm_specific = self.state.H_pcm_total / self.m_pcm
 
         # Update temperature from enthalpy
-        self.state.T_pcm = self.pcm.enthalpy_data.get_T_from_H(
-            self.state.H_pcm_specific,
-            self.state.curve
-        )
+        if self.state.is_supercooled:
+            # Supercooled: use sensible-only H->T (no latent heat release)
+            self.state.T_pcm = self.state.T_supercool_start - \
+                (self.state.H_supercool_start - self.state.H_pcm_specific) / self.pcm.cp_sensible
+
+            # Check nucleation trigger
+            if self.state.T_pcm <= self.pcm.T_liquidus - self.config.supercooling_deg:
+                # Nucleation! Switch back to solidifying curve — temperature jumps up
+                self.state.is_supercooled = False
+                self.state.T_pcm = self.pcm.enthalpy_data.get_T_from_H(
+                    self.state.H_pcm_specific, 'solidifying'
+                )
+        else:
+            self.state.T_pcm = self.pcm.enthalpy_data.get_T_from_H(
+                self.state.H_pcm_specific,
+                self.state.curve
+            )
 
         # Update front positions
         self._update_front_positions(abs(Q_fin), abs(Q_tube), dt)
@@ -678,6 +871,15 @@ class PCMHeatExchangerSimulation:
         self.state.Q_tube = Q_tube
         self.state.T_water_out = T_water_out
         self.state.E_total += abs(Q_total) * dt / 1000  # kJ
+        self.state.T_water_in = T_water_in
+        self.state.Q_source = Q_source_W
+        self.state.Q_loss = Q_loss
+        self.state.E_loss += abs(Q_loss) * dt / 1000  # kJ
+
+        # Update tank temperature in closed-loop mode
+        if self.operating.water_supply_mode == WaterSupplyMode.HEAT_SOURCE_SINK:
+            self._update_tank_temperature(T_water_out, dt)
+
         self.state.time += dt
 
         return self.state
@@ -689,11 +891,16 @@ class PCMHeatExchangerSimulation:
 
         initial_T = self.state.T_pcm
 
-        # Determine target temperature based on PCM category
-        if self.pcm.category == PCMCategory.HOT:
-            target_T = self.operating.T_water_hot
-        else:
-            target_T = self.operating.T_water_cold
+        # Determine target temperature for early termination
+        # In heat source/sink mode, skip early termination (run to t_max)
+        use_early_termination = (
+            self.operating.water_supply_mode == WaterSupplyMode.CONSTANT_TEMPERATURE
+        )
+        if use_early_termination:
+            if self.pcm.category == PCMCategory.HOT:
+                target_T = self.operating.T_water_hot
+            else:
+                target_T = self.operating.T_water_cold
 
         # Record initial state
         self.results.record(self.state)
@@ -707,17 +914,16 @@ class PCMHeatExchangerSimulation:
                 progress = min(self.state.time / t_max, 1.0)
                 self.progress_callback(progress, self.state)
 
-            # Check if complete
-            if self.pcm.category == PCMCategory.HOT:
-                # Hot PCM: charging complete when fully melted and near hot water temp
-                if (self.state.phase == Phase.FULLY_LIQUID and
-                    self.state.T_pcm >= target_T - 0.5):
-                    break
-            else:
-                # Cold PCM: charging complete when fully solidified and near cold water temp
-                if (self.state.phase == Phase.FULLY_SOLID and
-                    self.state.T_pcm <= target_T + 0.5):
-                    break
+            # Check if complete (only in constant temperature mode)
+            if use_early_termination:
+                if self.pcm.category == PCMCategory.HOT:
+                    if (self.state.phase == Phase.FULLY_LIQUID and
+                        self.state.T_pcm >= target_T - 0.5):
+                        break
+                else:
+                    if (self.state.phase == Phase.FULLY_SOLID and
+                        self.state.T_pcm <= target_T + 0.5):
+                        break
 
         summary = SimulationSummary(
             total_time_s=self.state.time,
@@ -741,11 +947,16 @@ class PCMHeatExchangerSimulation:
 
         initial_T = self.state.T_pcm
 
-        # Determine target temperature based on PCM category
-        if self.pcm.category == PCMCategory.HOT:
-            target_T = self.operating.T_water_cold
-        else:
-            target_T = self.operating.T_water_hot
+        # Determine target temperature for early termination
+        # In heat source/sink mode, skip early termination (run to t_max)
+        use_early_termination = (
+            self.operating.water_supply_mode == WaterSupplyMode.CONSTANT_TEMPERATURE
+        )
+        if use_early_termination:
+            if self.pcm.category == PCMCategory.HOT:
+                target_T = self.operating.T_water_cold
+            else:
+                target_T = self.operating.T_water_hot
 
         # Record initial state
         self.results.record(self.state)
@@ -759,17 +970,16 @@ class PCMHeatExchangerSimulation:
                 progress = min(self.state.time / t_max, 1.0)
                 self.progress_callback(progress, self.state)
 
-            # Check if complete
-            if self.pcm.category == PCMCategory.HOT:
-                # Hot PCM: discharging complete when fully solidified and near cold water temp
-                if (self.state.phase == Phase.FULLY_SOLID and
-                    self.state.T_pcm <= target_T + 0.5):
-                    break
-            else:
-                # Cold PCM: discharging complete when fully melted and near warm water temp
-                if (self.state.phase == Phase.FULLY_LIQUID and
-                    self.state.T_pcm >= target_T - 0.5):
-                    break
+            # Check if complete (only in constant temperature mode)
+            if use_early_termination:
+                if self.pcm.category == PCMCategory.HOT:
+                    if (self.state.phase == Phase.FULLY_SOLID and
+                        self.state.T_pcm <= target_T + 0.5):
+                        break
+                else:
+                    if (self.state.phase == Phase.FULLY_LIQUID and
+                        self.state.T_pcm >= target_T - 0.5):
+                        break
 
         summary = SimulationSummary(
             total_time_s=self.state.time,

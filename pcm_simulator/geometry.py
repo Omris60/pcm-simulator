@@ -27,6 +27,12 @@ class BoxGeometry:
         """Box volume in liters"""
         return self.volume_m3 * 1000
 
+    @property
+    def surface_area_m2(self) -> float:
+        """Total external surface area in m2 (all 6 faces)"""
+        L, W, H = self.length / 1000, self.width / 1000, self.height / 1000
+        return 2 * (L * W + L * H + W * H)
+
     def to_dict(self) -> Dict:
         """Convert to dictionary for display"""
         return {

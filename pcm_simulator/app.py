@@ -16,7 +16,11 @@ from simulation_core import (
     OperatingConditions,
     SimulationConfig,
     WaterProperties,
-    SimulationMode
+    SimulationMode,
+    WaterSupplyMode,
+    SourceControlMode,
+    HeatSourceSinkConfig,
+    WallLossConfig
 )
 from visualization import (
     create_temperature_plot,
@@ -27,6 +31,8 @@ from visualization import (
     create_enthalpy_plot,
     create_combined_dashboard,
     create_enthalpy_curve_plot,
+    create_source_power_plot,
+    create_wall_loss_plot,
     export_data_to_csv
 )
 
@@ -442,6 +448,16 @@ def main():
 
         Q_water = st.number_input("Water Flow Rate (lpm)", value=20.0, min_value=1.0, max_value=500.0)
 
+        # Water supply mode
+        water_supply_mode_str = st.radio(
+            "Water Supply Mode",
+            ["Constant Temperature", "Heat Source/Sink"],
+            horizontal=True
+        )
+        water_supply_mode = (WaterSupplyMode.HEAT_SOURCE_SINK
+                             if water_supply_mode_str == "Heat Source/Sink"
+                             else WaterSupplyMode.CONSTANT_TEMPERATURE)
+
         # Set default temperatures based on PCM category
         if pcm.category == PCMCategory.HOT:
             default_T_hot = pcm.T_liquidus + 3
@@ -452,11 +468,87 @@ def main():
             default_T_cold = pcm.T_solidus - 5
             default_T_init = pcm.T_liquidus + 3  # Start warm for charging
 
-        col1, col2 = st.columns(2)
-        with col1:
-            T_hot = st.number_input("Hot Water Temp (C)", value=float(default_T_hot), min_value=-10.0, max_value=100.0)
-        with col2:
-            T_cold = st.number_input("Cold Water Temp (C)", value=float(default_T_cold), min_value=-10.0, max_value=100.0)
+        heat_source_config = None
+
+        if water_supply_mode == WaterSupplyMode.CONSTANT_TEMPERATURE:
+            col1, col2 = st.columns(2)
+            with col1:
+                T_hot = st.number_input("Hot Water Temp (C)", value=float(default_T_hot), min_value=-10.0, max_value=100.0)
+            with col2:
+                T_cold = st.number_input("Cold Water Temp (C)", value=float(default_T_cold), min_value=-10.0, max_value=100.0)
+        else:
+            # Heat Source/Sink mode inputs
+            source_power = st.number_input("Source/Sink Power (kW)", value=5.0, min_value=0.1, max_value=100.0, step=0.5)
+            tank_volume = st.number_input("Tank Volume (L)", value=50.0, min_value=1.0, max_value=1000.0, step=5.0)
+            T_tank_initial = st.number_input("Initial Water Temp (C)", value=float(default_T_init), min_value=0.0, max_value=99.0)
+
+            source_control_str = st.radio(
+                "Control Mode",
+                ["Constant Power", "Thermostat"],
+                horizontal=True
+            )
+            source_control_mode = (SourceControlMode.THERMOSTAT
+                                   if source_control_str == "Thermostat"
+                                   else SourceControlMode.CONSTANT_POWER)
+
+            T_setpoint = 60.0
+            if source_control_mode == SourceControlMode.THERMOSTAT:
+                T_setpoint = st.number_input("Setpoint Temp (C)", value=60.0, min_value=0.0, max_value=99.0)
+
+            heat_source_config = HeatSourceSinkConfig(
+                power_kW=source_power,
+                tank_volume_L=tank_volume,
+                T_tank_initial=T_tank_initial,
+                control_mode=source_control_mode,
+                T_setpoint=T_setpoint
+            )
+            # Set dummy T_hot/T_cold (unused in this mode)
+            T_hot = 0.0
+            T_cold = 0.0
+
+        st.divider()
+
+        # ----- Wall Heat Loss -----
+        st.subheader("3b. Tank Wall Heat Loss")
+        wall_loss_enabled = st.checkbox("Enable Wall Heat Loss", value=False)
+
+        wall_loss_config = None
+        if wall_loss_enabled:
+            T_ambient = st.number_input("Ambient Temperature (C)", value=25.0, min_value=-10.0, max_value=50.0, step=1.0)
+
+            wall_material_presets = {
+                "Steel": 50.0,
+                "Aluminum": 205.0,
+                "Stainless Steel": 16.0,
+                "Plastic (HDPE)": 0.5,
+                "Custom": None,
+            }
+            wall_material = st.selectbox("Wall Material", list(wall_material_presets.keys()), index=0)
+
+            if wall_material == "Custom":
+                k_wall = st.number_input("Wall Conductivity (W/m·K)", value=50.0, min_value=0.1, max_value=500.0, step=1.0)
+            else:
+                k_wall = wall_material_presets[wall_material]
+
+            wall_thickness = st.number_input("Wall Thickness (mm)", value=2.0, min_value=0.5, max_value=50.0, step=0.5)
+
+            wall_loss_config = WallLossConfig(
+                enabled=True,
+                T_ambient=T_ambient,
+                wall_thickness_mm=wall_thickness,
+                k_wall=k_wall,
+                h_ext=10.0
+            )
+
+            # Display computed UA and estimated loss
+            R_wall = (wall_thickness / 1000) / k_wall + 1.0 / 10.0
+            UA = box.surface_area_m2 / R_wall
+            est_loss = UA * abs(default_T_init - T_ambient)
+            st.caption(
+                f"Surface area: {box.surface_area_m2:.2f} m² | "
+                f"UA: {UA:.1f} W/K | "
+                f"Est. initial loss: ~{est_loss:.0f} W"
+            )
 
         st.divider()
 
@@ -481,6 +573,15 @@ def main():
         with col2:
             dt = st.number_input("Time Step (s)", value=1.0, min_value=0.1, max_value=10.0)
 
+        supercooling_deg = st.number_input(
+            "Supercooling (°C)",
+            value=0.0,
+            min_value=0.0,
+            max_value=20.0,
+            step=0.5,
+            help="Degrees below T_liquidus the PCM can drop before nucleation triggers solidification. 0 = no supercooling."
+        )
+
         st.divider()
 
         # ----- Run Button -----
@@ -494,13 +595,17 @@ def main():
     operating = OperatingConditions(
         Q_water_lpm=Q_water,
         T_water_hot=T_hot,
-        T_water_cold=T_cold
+        T_water_cold=T_cold,
+        water_supply_mode=water_supply_mode,
+        heat_source_config=heat_source_config
     )
 
     config = SimulationConfig(
         dt=dt,
         t_max=t_max * 60,  # Convert to seconds
-        T_pcm_initial=T_pcm_init
+        T_pcm_initial=T_pcm_init,
+        supercooling_deg=supercooling_deg,
+        wall_loss=wall_loss_config
     )
 
     # System info columns
@@ -581,6 +686,7 @@ def main():
         results = st.session_state.results
         summary = st.session_state.summary
         data = results.to_numpy()
+        is_source_sink = water_supply_mode == WaterSupplyMode.HEAT_SOURCE_SINK
 
         st.divider()
 
@@ -603,6 +709,14 @@ def main():
         with col2:
             st.metric("Melt Fraction", f"{summary.final_melt_fraction*100:.0f}%")
 
+        if is_source_sink:
+            final_T_tank = data['T_tank_C'][-1] if len(data['T_tank_C']) > 0 else 0
+            st.metric("Final Tank Temperature", f"{final_T_tank:.1f} C")
+
+        if wall_loss_config and wall_loss_config.enabled:
+            final_E_loss = data['E_loss_kWh'][-1] if len(data['E_loss_kWh']) > 0 else 0
+            st.metric("Cumulative Wall Loss", f"{final_E_loss:.3f} kWh")
+
         st.divider()
 
         # Plots
@@ -615,44 +729,65 @@ def main():
             horizontal=True
         )
 
+        # Determine plot parameters based on water supply mode
+        plot_T_hot = None if is_source_sink else T_hot
+        plot_T_cold = None if is_source_sink else T_cold
+
         if plot_type == "Dashboard":
             fig = create_combined_dashboard(
                 data,
-                T_water_hot=T_hot,
-                T_water_cold=T_cold,
+                T_water_hot=plot_T_hot,
+                T_water_cold=plot_T_cold,
                 delta_max_mm=hex_geom.delta_max_fin * 1000,
                 title=f"PCM Simulation: {pcm.name} - {sim_mode}"
             )
             st.plotly_chart(fig, use_container_width=True)
         else:
             # Individual plots in tabs
-            tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-                "Temperature", "Power", "Energy", "Melt Fraction", "Front Position", "Enthalpy"
-            ])
+            tab_names = ["Temperature", "Power", "Energy", "Melt Fraction", "Front Position", "Enthalpy"]
+            is_wall_loss = wall_loss_config and wall_loss_config.enabled
+            if is_wall_loss:
+                tab_names.append("Wall Loss")
+            if is_source_sink:
+                tab_names.append("Source Power")
 
-            with tab1:
-                fig = create_temperature_plot(data, T_hot, T_cold)
+            tabs = st.tabs(tab_names)
+
+            with tabs[0]:
+                fig = create_temperature_plot(data, plot_T_hot, plot_T_cold)
                 st.plotly_chart(fig, use_container_width=True)
 
-            with tab2:
+            with tabs[1]:
                 fig = create_power_plot(data)
                 st.plotly_chart(fig, use_container_width=True)
 
-            with tab3:
+            with tabs[2]:
                 fig = create_energy_plot(data)
                 st.plotly_chart(fig, use_container_width=True)
 
-            with tab4:
+            with tabs[3]:
                 fig = create_melt_fraction_plot(data)
                 st.plotly_chart(fig, use_container_width=True)
 
-            with tab5:
+            with tabs[4]:
                 fig = create_front_position_plot(data, hex_geom.delta_max_fin * 1000)
                 st.plotly_chart(fig, use_container_width=True)
 
-            with tab6:
+            with tabs[5]:
                 fig = create_enthalpy_plot(data)
                 st.plotly_chart(fig, use_container_width=True)
+
+            next_tab = 6
+            if is_wall_loss:
+                with tabs[next_tab]:
+                    fig = create_wall_loss_plot(data)
+                    st.plotly_chart(fig, use_container_width=True)
+                next_tab += 1
+
+            if is_source_sink:
+                with tabs[next_tab]:
+                    fig = create_source_power_plot(data)
+                    st.plotly_chart(fig, use_container_width=True)
 
         st.divider()
 
