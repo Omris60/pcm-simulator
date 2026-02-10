@@ -21,7 +21,8 @@ from simulation_core import (
     SourceControlMode,
     HeatSourceSinkConfig,
     WallLossConfig,
-    PipeLossConfig
+    PipeLossConfig,
+    PumpConfig
 )
 from visualization import (
     create_temperature_plot,
@@ -37,7 +38,9 @@ from visualization import (
     create_loop_temperature_plot,
     create_pipe_loss_plot,
     create_system_schematic,
-    export_data_to_csv
+    export_data_to_csv,
+    create_sweep_heatmap,
+    create_sweep_line_plot
 )
 
 # Page config
@@ -74,6 +77,8 @@ if 'results' not in st.session_state:
     st.session_state.results = None
 if 'summary' not in st.session_state:
     st.session_state.summary = None
+if 'sweep_results' not in st.session_state:
+    st.session_state.sweep_results = None
 
 
 def main():
@@ -456,6 +461,7 @@ def main():
         water_supply_mode_str = st.radio(
             "Water Supply Mode",
             ["Constant Temperature", "Heat Source/Sink"],
+            index=1,
             horizontal=True
         )
         water_supply_mode = (WaterSupplyMode.HEAT_SOURCE_SINK
@@ -483,12 +489,13 @@ def main():
         else:
             # Heat Source/Sink mode inputs
             source_power = st.number_input("Source/Sink Power (kW)", value=5.0, min_value=0.1, max_value=100.0, step=0.5)
-            tank_volume = st.number_input("Tank Volume (L)", value=50.0, min_value=1.0, max_value=1000.0, step=5.0)
+            tank_volume = st.number_input("Tank Volume (L)", value=100.0, min_value=1.0, max_value=1000.0, step=5.0)
             T_tank_initial = st.number_input("Initial Water Temp (C)", value=float(default_T_init), min_value=0.0, max_value=99.0)
 
             source_control_str = st.radio(
                 "Control Mode",
                 ["Constant Power", "Thermostat"],
+                index=1,
                 horizontal=True
             )
             source_control_mode = (SourceControlMode.THERMOSTAT
@@ -520,21 +527,9 @@ def main():
         if wall_loss_enabled:
             T_ambient = st.number_input("Ambient Temperature (C)", value=25.0, min_value=-10.0, max_value=50.0, step=1.0)
 
-            wall_material_presets = {
-                "Steel": 50.0,
-                "Aluminum": 205.0,
-                "Stainless Steel": 16.0,
-                "Plastic (HDPE)": 0.5,
-                "Custom": None,
-            }
-            wall_material = st.selectbox("Wall Material", list(wall_material_presets.keys()), index=0)
+            k_wall = st.number_input("Wall Conductivity (W/m·K)", value=0.3, min_value=0.01, max_value=500.0, step=0.1)
 
-            if wall_material == "Custom":
-                k_wall = st.number_input("Wall Conductivity (W/m·K)", value=50.0, min_value=0.1, max_value=500.0, step=1.0)
-            else:
-                k_wall = wall_material_presets[wall_material]
-
-            wall_thickness = st.number_input("Wall Thickness (mm)", value=2.0, min_value=0.5, max_value=50.0, step=0.5)
+            wall_thickness = st.number_input("Wall Thickness (mm)", value=20.0, min_value=0.5, max_value=50.0, step=0.5)
 
             wall_loss_config = WallLossConfig(
                 enabled=True,
@@ -648,6 +643,27 @@ def main():
                     f"Est. total ΔT: ~{est_dT:.1f} °C"
                 )
 
+        # ----- Circulation Pump (closed-loop mode only) -----
+        pump_config = None
+        if water_supply_mode == WaterSupplyMode.HEAT_SOURCE_SINK:
+            st.divider()
+            st.subheader("3d. Circulation Pump")
+            pump_enabled = st.checkbox("Enable Pump Heat", value=False)
+
+            if pump_enabled:
+                pump_power_W = st.number_input(
+                    "Pump Power (W)", value=100.0, min_value=1.0, max_value=5000.0, step=10.0
+                )
+                pump_config = PumpConfig(enabled=True, power_W=pump_power_W)
+
+                # Show estimated dT
+                C_water_est = (Q_water / 60 * 1000 / 1000) * 4180  # ṁ·cp
+                if C_water_est > 0:
+                    est_pump_dT = pump_power_W / C_water_est
+                else:
+                    est_pump_dT = 0
+                st.caption(f"Est. pump ΔT: ~{est_pump_dT:.2f} °C")
+
         st.divider()
 
         # ----- Simulation Settings -----
@@ -704,7 +720,8 @@ def main():
         T_pcm_initial=T_pcm_init,
         supercooling_deg=supercooling_deg,
         wall_loss=wall_loss_config,
-        pipe_loss=pipe_loss_config
+        pipe_loss=pipe_loss_config,
+        pump=pump_config
     )
 
     # System info columns
@@ -747,7 +764,8 @@ def main():
     st.divider()
     st.subheader("System Schematic")
     fig_schematic = create_system_schematic(pcm, box, hex_geom, operating, m_pcm, E_latent,
-                                            pipe_loss_config=pipe_loss_config)
+                                            pipe_loss_config=pipe_loss_config,
+                                            pump_config=pump_config)
     st.plotly_chart(fig_schematic, use_container_width=True)
 
     # Run simulation
@@ -826,6 +844,10 @@ def main():
         if pipe_loss_config and pipe_loss_config.enabled:
             final_E_pipe = data['E_pipe_loss_kWh'][-1] if len(data['E_pipe_loss_kWh']) > 0 else 0
             st.metric("Cumulative Pipe Loss", f"{final_E_pipe:.3f} kWh")
+
+        if pump_config and pump_config.enabled:
+            avg_Q_pump = np.mean(data['Q_pump_kW']) if len(data['Q_pump_kW']) > 0 else 0
+            st.metric("Pump Heat Input", f"{avg_Q_pump:.3f} kW (avg)")
 
         st.divider()
 
@@ -934,6 +956,184 @@ def main():
             with st.expander("Preview Data"):
                 df = results.to_dataframe()
                 st.dataframe(df.head(20))
+
+        # =================================================================
+        # PARAMETRIC SWEEP
+        # =================================================================
+        st.divider()
+        st.subheader("Parametric Sweep")
+
+        with st.expander("Sweep Configuration"):
+            st.markdown("**Flow Rate Range**")
+            sw_col1, sw_col2, sw_col3 = st.columns(3)
+            with sw_col1:
+                sweep_flow_min = st.number_input("Min Flow (lpm)", value=1.0, min_value=0.1, max_value=500.0, step=1.0, key="sw_flow_min")
+            with sw_col2:
+                sweep_flow_max = st.number_input("Max Flow (lpm)", value=50.0, min_value=0.1, max_value=500.0, step=1.0, key="sw_flow_max")
+            with sw_col3:
+                sweep_flow_n = st.number_input("# Steps", value=10, min_value=3, max_value=30, step=1, key="sw_flow_n")
+
+            if is_source_sink:
+                st.markdown("**Source Power Range**")
+                sp_col1, sp_col2, sp_col3 = st.columns(3)
+                with sp_col1:
+                    sweep_power_min = st.number_input("Min Power (kW)", value=1.0, min_value=0.1, max_value=100.0, step=0.5, key="sw_pow_min")
+                with sp_col2:
+                    sweep_power_max = st.number_input("Max Power (kW)", value=20.0, min_value=0.1, max_value=100.0, step=0.5, key="sw_pow_max")
+                with sp_col3:
+                    sweep_power_n = st.number_input("# Steps", value=10, min_value=3, max_value=30, step=1, key="sw_pow_n")
+
+            run_sweep = st.button("Run Sweep", type="secondary", use_container_width=True)
+
+        if run_sweep:
+            flow_rates = np.linspace(sweep_flow_min, sweep_flow_max, int(sweep_flow_n))
+
+            if is_source_sink:
+                # 2D sweep: flow rate x source power
+                source_powers = np.linspace(sweep_power_min, sweep_power_max, int(sweep_power_n))
+                total_runs = len(flow_rates) * len(source_powers)
+
+                avg_power_mat = np.zeros((len(flow_rates), len(source_powers)))
+                energy_mat = np.zeros_like(avg_power_mat)
+                time_mat = np.zeros_like(avg_power_mat)
+                melt_mat = np.zeros_like(avg_power_mat)
+
+                progress = st.progress(0)
+                run_count = 0
+
+                for i, flow in enumerate(flow_rates):
+                    for j, power in enumerate(source_powers):
+                        sweep_hs_config = HeatSourceSinkConfig(
+                            power_kW=power,
+                            tank_volume_L=operating.heat_source_config.tank_volume_L,
+                            T_tank_initial=operating.heat_source_config.T_tank_initial,
+                            control_mode=operating.heat_source_config.control_mode,
+                            T_setpoint=operating.heat_source_config.T_setpoint,
+                        )
+                        sweep_op = OperatingConditions(
+                            Q_water_lpm=flow,
+                            T_water_hot=operating.T_water_hot,
+                            T_water_cold=operating.T_water_cold,
+                            water_supply_mode=operating.water_supply_mode,
+                            heat_source_config=sweep_hs_config,
+                        )
+                        sweep_sim = PCMHeatExchangerSimulation(
+                            hex_geometry=hex_geom,
+                            box_geometry=box,
+                            pcm=pcm,
+                            operating=sweep_op,
+                            config=config,
+                        )
+                        if sim_mode == "Charging":
+                            _, s = sweep_sim.run_charging()
+                        elif sim_mode == "Discharging":
+                            _, s = sweep_sim.run_discharging()
+                        else:
+                            _, s = sweep_sim.run_full_cycle(config.t_max / 2, config.t_max / 2)
+
+                        avg_power_mat[i, j] = s.average_power_kW
+                        energy_mat[i, j] = s.total_energy_kWh
+                        time_mat[i, j] = s.total_time_min
+                        melt_mat[i, j] = s.final_melt_fraction * 100
+
+                        run_count += 1
+                        progress.progress(run_count / total_runs)
+
+                st.session_state.sweep_results = {
+                    'mode': '2D',
+                    'flow_rates': flow_rates,
+                    'source_powers': source_powers,
+                    'avg_power': avg_power_mat,
+                    'energy': energy_mat,
+                    'time': time_mat,
+                    'melt': melt_mat,
+                }
+            else:
+                # 1D sweep: flow rate only (constant temperature mode)
+                total_runs = len(flow_rates)
+                avg_power_arr = np.zeros(total_runs)
+                energy_arr = np.zeros(total_runs)
+                time_arr = np.zeros(total_runs)
+                melt_arr = np.zeros(total_runs)
+
+                progress = st.progress(0)
+
+                for i, flow in enumerate(flow_rates):
+                    sweep_op = OperatingConditions(
+                        Q_water_lpm=flow,
+                        T_water_hot=operating.T_water_hot,
+                        T_water_cold=operating.T_water_cold,
+                        water_supply_mode=operating.water_supply_mode,
+                        heat_source_config=None,
+                    )
+                    sweep_sim = PCMHeatExchangerSimulation(
+                        hex_geometry=hex_geom,
+                        box_geometry=box,
+                        pcm=pcm,
+                        operating=sweep_op,
+                        config=config,
+                    )
+                    if sim_mode == "Charging":
+                        _, s = sweep_sim.run_charging()
+                    elif sim_mode == "Discharging":
+                        _, s = sweep_sim.run_discharging()
+                    else:
+                        _, s = sweep_sim.run_full_cycle(config.t_max / 2, config.t_max / 2)
+
+                    avg_power_arr[i] = s.average_power_kW
+                    energy_arr[i] = s.total_energy_kWh
+                    time_arr[i] = s.total_time_min
+                    melt_arr[i] = s.final_melt_fraction * 100
+
+                    progress.progress((i + 1) / total_runs)
+
+                st.session_state.sweep_results = {
+                    'mode': '1D',
+                    'flow_rates': flow_rates,
+                    'avg_power': avg_power_arr,
+                    'energy': energy_arr,
+                    'time': time_arr,
+                    'melt': melt_arr,
+                }
+
+        # Display sweep results
+        if st.session_state.sweep_results is not None:
+            sr = st.session_state.sweep_results
+            if sr['mode'] == '2D':
+                tab_names_sw = ["Avg Power", "Energy", "Time", "Melt Fraction"]
+                tabs_sw = st.tabs(tab_names_sw)
+                with tabs_sw[0]:
+                    fig = create_sweep_heatmap(sr['flow_rates'], sr['source_powers'],
+                                               sr['avg_power'], "Avg Power", "kW",
+                                               "Average Cell Power vs Flow Rate & Source Power")
+                    st.plotly_chart(fig, use_container_width=True)
+                with tabs_sw[1]:
+                    fig = create_sweep_heatmap(sr['flow_rates'], sr['source_powers'],
+                                               sr['energy'], "Energy", "kWh",
+                                               "Total Energy vs Flow Rate & Source Power")
+                    st.plotly_chart(fig, use_container_width=True)
+                with tabs_sw[2]:
+                    fig = create_sweep_heatmap(sr['flow_rates'], sr['source_powers'],
+                                               sr['time'], "Time", "min",
+                                               "Simulation Time vs Flow Rate & Source Power")
+                    st.plotly_chart(fig, use_container_width=True)
+                with tabs_sw[3]:
+                    fig = create_sweep_heatmap(sr['flow_rates'], sr['source_powers'],
+                                               sr['melt'], "Melt Fraction", "%",
+                                               "Final Melt Fraction vs Flow Rate & Source Power")
+                    st.plotly_chart(fig, use_container_width=True)
+            else:
+                # 1D line plot
+                metrics = {
+                    "Avg Power": (sr['avg_power'], "kW"),
+                    "Energy": (sr['energy'], "kWh"),
+                    "Time": (sr['time'], "min"),
+                    "Melt Fraction": (sr['melt'], "%"),
+                }
+                fig = create_sweep_line_plot(sr['flow_rates'], metrics,
+                                             "Flow Rate (lpm)",
+                                             "Parametric Sweep: Flow Rate")
+                st.plotly_chart(fig, use_container_width=True)
 
     else:
         # Show instructions

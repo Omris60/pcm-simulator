@@ -108,6 +108,13 @@ class PipeLossConfig:
 
 
 @dataclass
+class PumpConfig:
+    """Configuration for circulation pump heat addition"""
+    enabled: bool = False
+    power_W: float = 100.0    # Pump electrical power [W] — all becomes heat in water
+
+
+@dataclass
 class SimulationConfig:
     """Simulation configuration"""
     dt: float = 1.0                    # Time step [seconds]
@@ -118,6 +125,7 @@ class SimulationConfig:
     supercooling_deg: float = 0.0      # Degrees below T_liquidus before nucleation
     wall_loss: Optional[WallLossConfig] = None
     pipe_loss: Optional[PipeLossConfig] = None
+    pump: Optional[PumpConfig] = None
 
 
 @dataclass
@@ -178,6 +186,10 @@ class SimulationState:
     Q_pipe_loss_2: float = 0.0       # Pipe 2: Source → HEX [W]
     Q_pipe_loss_3: float = 0.0       # Pipe 3: HEX → Tank [W]
 
+    # Pump heat
+    T_after_pump: float = 0.0        # Temperature after pump heat addition [°C]
+    Q_pump: float = 0.0              # Pump heat input [W]
+
     # Supercooling tracking
     is_supercooled: bool = False
     H_supercool_start: float = 0.0    # Enthalpy when supercooling began [kJ/kg]
@@ -217,6 +229,10 @@ class SimulationResults:
     Q_pipe_loss_2: List[float] = field(default_factory=list)
     Q_pipe_loss_3: List[float] = field(default_factory=list)
 
+    # Pump heat
+    T_after_pump: List[float] = field(default_factory=list)
+    Q_pump: List[float] = field(default_factory=list)
+
     def record(self, state: SimulationState):
         """Record current state"""
         self.time.append(state.time)
@@ -244,6 +260,8 @@ class SimulationResults:
         self.Q_pipe_loss_1.append(state.Q_pipe_loss_1 / 1000)  # Convert to kW
         self.Q_pipe_loss_2.append(state.Q_pipe_loss_2 / 1000)  # Convert to kW
         self.Q_pipe_loss_3.append(state.Q_pipe_loss_3 / 1000)  # Convert to kW
+        self.T_after_pump.append(state.T_after_pump)
+        self.Q_pump.append(state.Q_pump / 1000)  # Convert to kW
 
     def to_numpy(self) -> Dict[str, np.ndarray]:
         """Convert to numpy arrays"""
@@ -273,6 +291,8 @@ class SimulationResults:
             'Q_pipe_loss_1_kW': np.array(self.Q_pipe_loss_1),
             'Q_pipe_loss_2_kW': np.array(self.Q_pipe_loss_2),
             'Q_pipe_loss_3_kW': np.array(self.Q_pipe_loss_3),
+            'T_after_pump_C': np.array(self.T_after_pump),
+            'Q_pump_kW': np.array(self.Q_pump),
         }
 
     def to_dataframe(self):
@@ -305,6 +325,8 @@ class SimulationResults:
             'Q_pipe_loss_1 (kW)': data['Q_pipe_loss_1_kW'],
             'Q_pipe_loss_2 (kW)': data['Q_pipe_loss_2_kW'],
             'Q_pipe_loss_3 (kW)': data['Q_pipe_loss_3_kW'],
+            'T_after_pump (C)': data['T_after_pump_C'],
+            'Q_pump (kW)': data['Q_pump_kW'],
         })
         return df
 
@@ -415,6 +437,11 @@ class PCMHeatExchangerSimulation:
             self._T_ambient = wl.T_ambient
         else:
             self._T_ambient = 25.0
+
+        # Pump heat
+        self._pump_power_W = 0.0
+        if self.config.pump and self.config.pump.enabled:
+            self._pump_power_W = self.config.pump.power_W
 
         # Pipe heat loss UA (closed-loop mode only)
         self._pipe_UA_1 = 0.0
@@ -790,6 +817,18 @@ class PCMHeatExchangerSimulation:
                 else:
                     self.state.phase = Phase.MELTING
 
+    def _apply_pump_heat(self, T_fluid: float) -> Tuple[float, float]:
+        """
+        Apply pump electrical heat to flowing fluid.
+
+        Returns:
+            (T_after_pump, Q_pump_W): Adjusted temperature and pump heat [W]
+        """
+        if self._pump_power_W <= 0 or self.C_water <= 0:
+            return T_fluid, 0.0
+        dT = self._pump_power_W / self.C_water
+        return T_fluid + dT, self._pump_power_W
+
     def _apply_pipe_loss(self, T_fluid: float, UA: float) -> Tuple[float, float]:
         """
         Apply pipe heat loss to flowing fluid.
@@ -906,11 +945,15 @@ class PCMHeatExchangerSimulation:
         # Select water inlet temperature based on water supply mode
         Q_pipe_total = 0.0   # Total pipe heat loss this step [W]
         Q_pipe1 = Q_pipe2 = Q_pipe3 = 0.0
+        Q_pump_W = 0.0
         if self.operating.water_supply_mode == WaterSupplyMode.HEAT_SOURCE_SINK:
             T_after_source, Q_source_W, Q_pipe1, T_at_source_inlet = self._calculate_closed_loop_water_in(mode)
 
+            # --- Pump: adds electrical heat to water between source and Pipe 2 ---
+            T_after_pump, Q_pump_W = self._apply_pump_heat(T_after_source)
+
             # --- Pipe 2: Source/Sink → HEX Cell (loss to ambient) ---
-            T_water_in, Q_pipe2 = self._apply_pipe_loss(T_after_source, self._pipe_UA_2)
+            T_water_in, Q_pipe2 = self._apply_pipe_loss(T_after_pump, self._pipe_UA_2)
 
             Q_pipe_total = Q_pipe1 + Q_pipe2  # Pipe 3 added after HEX below
         else:
@@ -1000,12 +1043,16 @@ class PCMHeatExchangerSimulation:
             # Store loop temperature sensors
             self.state.T_at_source_inlet = T_at_source_inlet
             self.state.T_after_source = T_after_source
+            self.state.T_after_pump = T_after_pump
             self.state.T_return_to_tank = T_return
 
             # Store per-segment pipe losses
             self.state.Q_pipe_loss_1 = Q_pipe1
             self.state.Q_pipe_loss_2 = Q_pipe2
             self.state.Q_pipe_loss_3 = Q_pipe3
+
+            # Store pump heat
+            self.state.Q_pump = Q_pump_W
 
         # Store pipe loss
         self.state.Q_pipe_loss = Q_pipe_total

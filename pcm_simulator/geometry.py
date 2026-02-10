@@ -178,7 +178,7 @@ def get_standard_lordan_hex() -> HEXGeometry:
         A_flow_cm2=3.0348,       # cm2
         k_fin=205,
         k_tube=205,
-        name="Standard Lordan HEX"
+        name="V3 Experiment HEX (Lordan)"
     )
 
 
@@ -188,7 +188,7 @@ def get_standard_box() -> BoxGeometry:
         length=910,    # mm
         width=152,     # mm
         height=620,    # mm
-        name="Standard Lordan Box"
+        name="V3 Experiment Box"
     )
 
 
@@ -226,7 +226,7 @@ def get_large_lordan_hex() -> HEXGeometry:
         A_flow_cm2=round(A_flow_cm2, 4),
         k_fin=205,
         k_tube=205,
-        name="Large Lordan HEX"
+        name="Commercial HEX (Lordan)"
     )
 
 
@@ -236,41 +236,9 @@ def get_large_lordan_box() -> BoxGeometry:
         length=723,    # mm
         width=602,     # mm
         height=550,    # mm
-        name="Large Lordan Box"
+        name="Commercial Cell (Nir)"
     )
 
-
-def get_compact_hex() -> HEXGeometry:
-    """Compact HEX geometry for smaller applications"""
-    return HEXGeometry(
-        D_in=6.35,               # mm (1/4")
-        D_out=7.94,              # mm
-        N_rows=4,
-        N_levels=15,
-        L_tube=500,              # mm
-        L_tube_total=8000,       # mm
-        tube_pitch=20.0,         # mm
-        t_fin=0.25,              # mm
-        FPI=5,
-        width_mm=100.0,
-        A_total=6.5,             # m2
-        A_primary=1.2,           # m2
-        A_secondary=5.3,         # m2
-        A_flow_cm2=1.27,         # cm2
-        k_fin=205,
-        k_tube=205,
-        name="Compact HEX"
-    )
-
-
-def get_compact_box() -> BoxGeometry:
-    """Compact box geometry"""
-    return BoxGeometry(
-        length=600,    # mm
-        width=120,     # mm
-        height=400,    # mm
-        name="Compact Box"
-    )
 
 
 class GeometryPresets:
@@ -279,20 +247,19 @@ class GeometryPresets:
     @staticmethod
     def list_hex_presets() -> list:
         """List available HEX presets"""
-        return ["Standard Lordan HEX", "Large Lordan HEX", "Compact HEX", "Custom"]
+        return ["V3 Experiment HEX (Lordan)", "Commercial HEX (Lordan)", "Custom"]
 
     @staticmethod
     def list_box_presets() -> list:
         """List available box presets"""
-        return ["Standard Lordan Box", "Large Lordan Box", "Compact Box", "Custom"]
+        return ["V3 Experiment Box", "Commercial Cell (Nir)", "Custom"]
 
     @staticmethod
     def get_hex(name: str) -> Optional[HEXGeometry]:
         """Get HEX geometry by name"""
         presets = {
-            "Standard Lordan HEX": get_standard_lordan_hex,
-            "Large Lordan HEX": get_large_lordan_hex,
-            "Compact HEX": get_compact_hex,
+            "V3 Experiment HEX (Lordan)": get_standard_lordan_hex,
+            "Commercial HEX (Lordan)": get_large_lordan_hex,
         }
         if name in presets:
             return presets[name]()
@@ -302,9 +269,8 @@ class GeometryPresets:
     def get_box(name: str) -> Optional[BoxGeometry]:
         """Get box geometry by name"""
         presets = {
-            "Standard Lordan Box": get_standard_box,
-            "Large Lordan Box": get_large_lordan_box,
-            "Compact Box": get_compact_box,
+            "V3 Experiment Box": get_standard_box,
+            "Commercial Cell (Nir)": get_large_lordan_box,
         }
         if name in presets:
             return presets[name]()

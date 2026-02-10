@@ -394,12 +394,20 @@ def create_loop_temperature_plot(data: Dict[str, np.ndarray],
         line=dict(color='#42A5F5', width=1.5, dash='dot')
     ))
 
-    # 3. After source (before Pipe 2 loss)
+    # 3. After source (before pump)
     fig.add_trace(go.Scatter(
         x=data['time_min'], y=data['T_after_source_C'],
         mode='lines', name='T_after_source',
         line=dict(color='#E65100', width=2)
     ))
+
+    # 3b. After pump (between source and Pipe 2)
+    if 'T_after_pump_C' in data and np.any(data['T_after_pump_C'] != 0):
+        fig.add_trace(go.Scatter(
+            x=data['time_min'], y=data['T_after_pump_C'],
+            mode='lines', name='T_after_pump',
+            line=dict(color='#D81B60', width=2, dash='dashdot')
+        ))
 
     # 4. Water in at HEX (after Pipe 2 loss)
     fig.add_trace(go.Scatter(
@@ -469,6 +477,16 @@ def create_pipe_loss_plot(data: Dict[str, np.ndarray],
         name='Total Pipe Loss',
         line=dict(color='black', width=2, dash='dash')
     ))
+
+    # Pump heat trace (when present and non-zero)
+    if 'Q_pump_kW' in data and np.any(data['Q_pump_kW'] != 0):
+        fig.add_trace(go.Scatter(
+            x=data['time_min'],
+            y=data['Q_pump_kW'],
+            mode='lines',
+            name='Pump Heat',
+            line=dict(color='#D81B60', width=2, dash='dashdot')
+        ))
 
     fig.update_layout(
         title=title,
@@ -559,6 +577,11 @@ def export_data_to_csv(data: Dict[str, np.ndarray]) -> str:
         columns['Q_pipe_loss_2 (kW)'] = data['Q_pipe_loss_2_kW']
     if 'Q_pipe_loss_3_kW' in data and np.any(data['Q_pipe_loss_3_kW'] != 0):
         columns['Q_pipe_loss_3 (kW)'] = data['Q_pipe_loss_3_kW']
+    # Pump heat
+    if 'T_after_pump_C' in data and np.any(data['T_after_pump_C'] != 0):
+        columns['T_after_pump (C)'] = data['T_after_pump_C']
+    if 'Q_pump_kW' in data and np.any(data['Q_pump_kW'] != 0):
+        columns['Q_pump (kW)'] = data['Q_pump_kW']
     df = pd.DataFrame(columns)
     return df.to_csv(index=False)
 
@@ -703,7 +726,7 @@ def _schematic_layout(fig, title):
 
 
 def create_system_schematic(pcm, box, hex_geom, operating, m_pcm, E_latent,
-                            pipe_loss_config=None) -> go.Figure:
+                            pipe_loss_config=None, pump_config=None) -> go.Figure:
     """Create a PFD-style system schematic.
 
     Draws either a constant-temperature or closed-loop (heat source/sink)
@@ -716,7 +739,8 @@ def create_system_schematic(pcm, box, hex_geom, operating, m_pcm, E_latent,
 
     if is_source_sink:
         return _schematic_source_sink(pcm, box, hex_geom, operating, m_pcm, E_latent, flow,
-                                       pipe_loss_config=pipe_loss_config)
+                                       pipe_loss_config=pipe_loss_config,
+                                       pump_config=pump_config)
     else:
         return _schematic_constant_temp(pcm, box, hex_geom, operating, m_pcm, E_latent, flow)
 
@@ -753,27 +777,35 @@ def _schematic_constant_temp(pcm, box, hex_geom, operating, m_pcm, E_latent, flo
 
 
 def _schematic_source_sink(pcm, box, hex_geom, operating, m_pcm, E_latent, flow,
-                           pipe_loss_config=None):
+                           pipe_loss_config=None, pump_config=None):
     import numpy as _np
     fig = go.Figure()
     cfg = operating.heat_source_config
 
+    pump_enabled = pump_config is not None and pump_config.enabled
+
     # Wider layout with more spacing between components
     # Water Tank
-    _schematic_box(fig, 0.01, 0.32, 0.18, 0.78, "rgba(66,165,245,0.12)", "#1E88E5")
-    _schematic_label(fig, 0.095, 0.66, "<b>Water</b><br><b>Tank</b>", size=14, color="#1565C0")
-    _schematic_label(fig, 0.095, 0.48, f"{cfg.tank_volume_L:.0f} L", size=12, color="#555")
-    _schematic_label(fig, 0.095, 0.38, f"T₀ = {cfg.T_tank_initial:.0f} °C", size=11, color="#777")
+    _schematic_box(fig, 0.01, 0.32, 0.16, 0.78, "rgba(66,165,245,0.12)", "#1E88E5")
+    _schematic_label(fig, 0.085, 0.66, "<b>Water</b><br><b>Tank</b>", size=14, color="#1565C0")
+    _schematic_label(fig, 0.085, 0.48, f"{cfg.tank_volume_L:.0f} L", size=12, color="#555")
+    _schematic_label(fig, 0.085, 0.38, f"T₀ = {cfg.T_tank_initial:.0f} °C", size=11, color="#777")
 
     # Heat Source/Sink
-    _schematic_box(fig, 0.32, 0.32, 0.52, 0.78, "rgba(255,167,38,0.15)", "#FB8C00")
-    _schematic_label(fig, 0.42, 0.66, "<b>Heat</b><br><b>Source/Sink</b>", size=13, color="#E65100")
-    _schematic_label(fig, 0.42, 0.48, f"{cfg.power_kW:.1f} kW", size=12, color="#555")
-    _schematic_label(fig, 0.42, 0.38, cfg.control_mode.value, size=11, color="#777")
+    _schematic_box(fig, 0.26, 0.32, 0.44, 0.78, "rgba(255,167,38,0.15)", "#FB8C00")
+    _schematic_label(fig, 0.35, 0.66, "<b>Heat</b><br><b>Source/Sink</b>", size=13, color="#E65100")
+    _schematic_label(fig, 0.35, 0.48, f"{cfg.power_kW:.1f} kW", size=12, color="#555")
+    _schematic_label(fig, 0.35, 0.38, cfg.control_mode.value, size=11, color="#777")
+
+    # Pump (between Source and Cell)
+    if pump_enabled:
+        _schematic_box(fig, 0.50, 0.40, 0.62, 0.70, "rgba(216,27,96,0.12)", "#D81B60")
+        _schematic_label(fig, 0.56, 0.60, "<b>Pump</b>", size=13, color="#D81B60")
+        _schematic_label(fig, 0.56, 0.48, f"{pump_config.power_W:.0f} W", size=11, color="#555")
 
     # PCM Cell
-    _schematic_box(fig, 0.66, 0.24, 0.99, 0.86, "rgba(102,187,106,0.12)", "#43A047")
-    _pcm_cell_labels(fig, 0.825, pcm, box, hex_geom, m_pcm, E_latent, y_top=0.76)
+    _schematic_box(fig, 0.70, 0.24, 0.99, 0.86, "rgba(102,187,106,0.12)", "#43A047")
+    _pcm_cell_labels(fig, 0.845, pcm, box, hex_geom, m_pcm, E_latent, y_top=0.76)
 
     # === Pre-compute design temperatures for labels ===
     T_tank = cfg.T_tank_initial
@@ -785,6 +817,11 @@ def _schematic_source_sink(pcm, box, hex_geom, operating, m_pcm, E_latent, flow,
     water_cp = 4180
     m_dot = operating.Q_water_lpm / 60 * 1000 / 1000  # kg/s
     C_w = m_dot * water_cp
+
+    # Estimate pump dT
+    dT_pump = 0.0
+    if pump_enabled and C_w > 0:
+        dT_pump = pump_config.power_W / C_w
 
     if pipe_enabled and C_w > 0:
         pl = pipe_loss_config
@@ -807,44 +844,51 @@ def _schematic_source_sink(pcm, box, hex_geom, operating, m_pcm, E_latent, flow,
         Q_pipe1 = UA1 * (T_tank - pl.T_ambient)
         dT_pipe1 = Q_pipe1 / C_w if C_w > 0 else 0
         T_at_source = T_tank - dT_pipe1
-        # Rough T_after_source = T_at_source + power/C_w (for display only)
         T_after_source_est = T_at_source + cfg.power_kW * 1000 / C_w if C_w > 0 else T_at_source
-        Q_pipe2 = UA2 * (T_after_source_est - pl.T_ambient)
+        T_after_pump_est = T_after_source_est + dT_pump
+        Q_pipe2 = UA2 * (T_after_pump_est - pl.T_ambient)
         dT_pipe2 = Q_pipe2 / C_w if C_w > 0 else 0
-        # Pipe 3: rough estimate using tank temp
         Q_pipe3 = UA3 * (T_tank - pl.T_ambient)
         dT_pipe3 = Q_pipe3 / C_w if C_w > 0 else 0
 
-    # === Forward arrows: Tank → Source → Cell (top path) ===
+    # === Forward arrows: Tank → Source → [Pump] → Cell (top path) ===
     arrow_y = 0.70
 
     # Pipe 1: Tank → Source
-    _schematic_arrow(fig, 0.18, arrow_y, 0.32, arrow_y, color="#1565C0", label=flow)
-    # Temperature labels: T₁ at start, T₂ at end
-    _schematic_label(fig, 0.19, arrow_y + 0.06, f"T₁={T_tank:.0f}°C", size=9, color="#1565C0")
+    _schematic_arrow(fig, 0.16, arrow_y, 0.26, arrow_y, color="#1565C0", label=flow)
+    _schematic_label(fig, 0.17, arrow_y + 0.06, f"T₁={T_tank:.0f}°C", size=9, color="#1565C0")
     if pipe_enabled and abs(dT_pipe1) > 0.05:
-        _schematic_label(fig, 0.25, arrow_y - 0.06,
+        _schematic_label(fig, 0.21, arrow_y - 0.06,
                          f"<i>ΔT≈{dT_pipe1:.1f}°C</i>", size=8, color="#9E9E9E")
 
-    # Pipe 2: Source → Cell
-    _schematic_arrow(fig, 0.52, arrow_y, 0.66, arrow_y, color="#E65100")
-    if pipe_enabled and abs(dT_pipe2) > 0.05:
-        _schematic_label(fig, 0.59, arrow_y - 0.06,
-                         f"<i>ΔT≈{dT_pipe2:.1f}°C</i>", size=8, color="#9E9E9E")
+    if pump_enabled:
+        # Source → Pump
+        _schematic_arrow(fig, 0.44, arrow_y, 0.50, arrow_y, color="#E65100")
+        # Pump → Cell (Pipe 2)
+        _schematic_arrow(fig, 0.62, arrow_y, 0.70, arrow_y, color="#D81B60")
+        if pipe_enabled and abs(dT_pipe2) > 0.05:
+            _schematic_label(fig, 0.66, arrow_y - 0.06,
+                             f"<i>ΔT≈{dT_pipe2:.1f}°C</i>", size=8, color="#9E9E9E")
+    else:
+        # Source → Cell (Pipe 2) — no pump
+        _schematic_arrow(fig, 0.44, arrow_y, 0.70, arrow_y, color="#E65100")
+        if pipe_enabled and abs(dT_pipe2) > 0.05:
+            _schematic_label(fig, 0.57, arrow_y - 0.06,
+                             f"<i>ΔT≈{dT_pipe2:.1f}°C</i>", size=8, color="#9E9E9E")
 
     # === Return path: Cell → down → horizontal → up into Tank ===
     ret_y_top = 0.24
     ret_y_bot = 0.14
 
     # Cell exit → down
-    _schematic_arrow(fig, 0.825, ret_y_top, 0.825, ret_y_bot, color="#78909C", width=2)
+    _schematic_arrow(fig, 0.845, ret_y_top, 0.845, ret_y_bot, color="#78909C", width=2)
     # Horizontal return line
     fig.add_shape(
-        type="line", x0=0.095, y0=ret_y_bot, x1=0.825, y1=ret_y_bot,
+        type="line", x0=0.085, y0=ret_y_bot, x1=0.845, y1=ret_y_bot,
         line=dict(color="#78909C", width=2),
     )
     # Up into tank
-    _schematic_arrow(fig, 0.095, ret_y_bot, 0.095, 0.32, color="#78909C", width=2)
+    _schematic_arrow(fig, 0.085, ret_y_bot, 0.085, 0.32, color="#78909C", width=2)
 
     # Pipe 3 label on return path
     _schematic_label(fig, 0.46, ret_y_bot + 0.05, "Return", size=10, color="#78909C")
@@ -852,11 +896,99 @@ def _schematic_source_sink(pcm, box, hex_geom, operating, m_pcm, E_latent, flow,
         _schematic_label(fig, 0.46, ret_y_bot - 0.05,
                          f"<i>Pipe 3: ΔT≈{dT_pipe3:.1f}°C</i>", size=8, color="#9E9E9E")
 
-    # Pipe loss summary annotation (bottom-right)
+    # Annotations (bottom-right)
+    annotations = []
     if pipe_enabled:
         total_Q = Q_pipe1 + Q_pipe2 + Q_pipe3
-        _schematic_label(fig, 0.82, 0.05,
-                         f"<i>Total pipe loss ≈ {total_Q:.0f} W</i>", size=9, color="#9E9E9E")
+        annotations.append(f"Pipe loss ≈ {total_Q:.0f} W")
+    if pump_enabled:
+        annotations.append(f"Pump ΔT ≈ {dT_pump:.1f} °C")
+    if annotations:
+        _schematic_label(fig, 0.85, 0.05,
+                         f"<i>{' | '.join(annotations)}</i>", size=9, color="#9E9E9E")
 
     _schematic_layout(fig, "System Schematic — Heat Source/Sink Mode")
+    return fig
+
+
+# =============================================================================
+# PARAMETRIC SWEEP PLOTS
+# =============================================================================
+
+def create_sweep_heatmap(flow_rates, source_powers, metric_matrix,
+                         metric_name, metric_unit, title) -> go.Figure:
+    """Create a 2D heatmap for parametric sweep results.
+
+    Args:
+        flow_rates: 1D array of flow rates (Y axis)
+        source_powers: 1D array of source powers (X axis)
+        metric_matrix: 2D array [len(flow_rates) x len(source_powers)]
+        metric_name: Name of the metric for hover
+        metric_unit: Unit string
+        title: Plot title
+    """
+    fig = go.Figure(data=go.Heatmap(
+        z=metric_matrix,
+        x=source_powers,
+        y=flow_rates,
+        colorscale='Viridis',
+        colorbar=dict(title=f"{metric_name} ({metric_unit})"),
+        hovertemplate=(
+            f"Source Power: %{{x:.1f}} kW<br>"
+            f"Flow Rate: %{{y:.1f}} lpm<br>"
+            f"{metric_name}: %{{z:.3f}} {metric_unit}"
+            "<extra></extra>"
+        ),
+    ))
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Source Power (kW)",
+        yaxis_title="Flow Rate (lpm)",
+        height=500,
+    )
+
+    return fig
+
+
+def create_sweep_line_plot(sweep_values, metrics_dict, x_label, title) -> go.Figure:
+    """Create a 1D line plot for parametric sweep results.
+
+    Args:
+        sweep_values: 1D array of sweep parameter values (X axis)
+        metrics_dict: dict of {metric_name: (values_array, unit_str)}
+        x_label: Label for X axis
+        title: Plot title
+    """
+    from plotly.subplots import make_subplots
+
+    metric_names = list(metrics_dict.keys())
+    n = len(metric_names)
+
+    fig = make_subplots(rows=n, cols=1,
+                        subplot_titles=metric_names,
+                        vertical_spacing=0.08,
+                        shared_xaxes=True)
+
+    colors = ['#1565C0', '#E65100', '#2E7D32', '#7B1FA2']
+
+    for i, name in enumerate(metric_names):
+        values, unit = metrics_dict[name]
+        fig.add_trace(go.Scatter(
+            x=sweep_values,
+            y=values,
+            mode='lines+markers',
+            name=name,
+            line=dict(color=colors[i % len(colors)], width=2),
+            marker=dict(size=6),
+        ), row=i+1, col=1)
+        fig.update_yaxes(title_text=f"{name} ({unit})", row=i+1, col=1)
+
+    fig.update_xaxes(title_text=x_label, row=n, col=1)
+    fig.update_layout(
+        title=title,
+        height=250 * n,
+        showlegend=False,
+    )
+
     return fig
