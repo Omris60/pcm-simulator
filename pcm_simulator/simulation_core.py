@@ -94,6 +94,20 @@ class WallLossConfig:
 
 
 @dataclass
+class PipeLossConfig:
+    """Configuration for pipe heat losses between components (closed-loop mode only)"""
+    enabled: bool = False
+    T_ambient: float = 25.0                  # Ambient temperature [°C]
+    pipe_OD_mm: float = 30.0                 # Pipe outer diameter [mm]
+    insulation_thickness_mm: float = 13.0    # Insulation thickness [mm] (0 = bare pipe)
+    k_insulation: float = 0.04               # Insulation conductivity [W/(m·K)]
+    h_ext: float = 10.0                      # External convection coefficient [W/(m²·K)]
+    L_tank_to_source_m: float = 20.0         # Pipe 1: Tank → Source/Sink [m]
+    L_source_to_hex_m: float = 20.0          # Pipe 2: Source/Sink → HEX Cell [m]
+    L_hex_to_tank_m: float = 5.0             # Pipe 3: HEX Cell → Tank [m]
+
+
+@dataclass
 class SimulationConfig:
     """Simulation configuration"""
     dt: float = 1.0                    # Time step [seconds]
@@ -103,6 +117,7 @@ class SimulationConfig:
     max_iterations: int = 50           # Maximum iterations
     supercooling_deg: float = 0.0      # Degrees below T_liquidus before nucleation
     wall_loss: Optional[WallLossConfig] = None
+    pipe_loss: Optional[PipeLossConfig] = None
 
 
 @dataclass
@@ -139,6 +154,10 @@ class SimulationState:
     Q_loss: float = 0.0                # Wall heat loss rate [W]
     E_loss: float = 0.0                # Cumulative wall loss energy [kJ]
 
+    # Pipe heat loss (closed-loop mode)
+    Q_pipe_loss: float = 0.0           # Total pipe loss rate [W]
+    E_pipe_loss: float = 0.0           # Cumulative pipe loss energy [kJ]
+
     # Phase and mode
     phase: Phase = Phase.FULLY_SOLID
     mode: SimulationMode = SimulationMode.IDLE
@@ -148,6 +167,16 @@ class SimulationState:
     T_water_in: float = 0.0    # Water inlet temp to HEX (varies in closed-loop mode)
     T_tank: float = 0.0        # Tank temperature
     Q_source: float = 0.0      # Heat source/sink power this step [W] (signed)
+
+    # Loop temperature sensors (closed-loop mode)
+    T_at_source_inlet: float = 0.0   # After Pipe 1 loss, before source
+    T_after_source: float = 0.0      # After source, before Pipe 2 loss
+    T_return_to_tank: float = 0.0    # After Pipe 3 loss, entering tank
+
+    # Per-segment pipe losses
+    Q_pipe_loss_1: float = 0.0       # Pipe 1: Tank → Source [W]
+    Q_pipe_loss_2: float = 0.0       # Pipe 2: Source → HEX [W]
+    Q_pipe_loss_3: float = 0.0       # Pipe 3: HEX → Tank [W]
 
     # Supercooling tracking
     is_supercooled: bool = False
@@ -175,6 +204,18 @@ class SimulationResults:
     Q_source_kW: List[float] = field(default_factory=list)
     Q_loss: List[float] = field(default_factory=list)
     E_loss: List[float] = field(default_factory=list)
+    Q_pipe_loss: List[float] = field(default_factory=list)
+    E_pipe_loss: List[float] = field(default_factory=list)
+
+    # Loop temperature sensors (closed-loop mode)
+    T_at_source_inlet: List[float] = field(default_factory=list)
+    T_after_source: List[float] = field(default_factory=list)
+    T_return_to_tank: List[float] = field(default_factory=list)
+
+    # Per-segment pipe losses
+    Q_pipe_loss_1: List[float] = field(default_factory=list)
+    Q_pipe_loss_2: List[float] = field(default_factory=list)
+    Q_pipe_loss_3: List[float] = field(default_factory=list)
 
     def record(self, state: SimulationState):
         """Record current state"""
@@ -195,6 +236,14 @@ class SimulationResults:
         self.Q_source_kW.append(state.Q_source / 1000)
         self.Q_loss.append(state.Q_loss / 1000)       # Convert to kW
         self.E_loss.append(state.E_loss / 3600)        # Convert to kWh
+        self.Q_pipe_loss.append(state.Q_pipe_loss / 1000)  # Convert to kW
+        self.E_pipe_loss.append(state.E_pipe_loss / 3600)  # Convert to kWh
+        self.T_at_source_inlet.append(state.T_at_source_inlet)
+        self.T_after_source.append(state.T_after_source)
+        self.T_return_to_tank.append(state.T_return_to_tank)
+        self.Q_pipe_loss_1.append(state.Q_pipe_loss_1 / 1000)  # Convert to kW
+        self.Q_pipe_loss_2.append(state.Q_pipe_loss_2 / 1000)  # Convert to kW
+        self.Q_pipe_loss_3.append(state.Q_pipe_loss_3 / 1000)  # Convert to kW
 
     def to_numpy(self) -> Dict[str, np.ndarray]:
         """Convert to numpy arrays"""
@@ -216,6 +265,14 @@ class SimulationResults:
             'Q_source_kW': np.array(self.Q_source_kW),
             'Q_loss_kW': np.array(self.Q_loss),
             'E_loss_kWh': np.array(self.E_loss),
+            'Q_pipe_loss_kW': np.array(self.Q_pipe_loss),
+            'E_pipe_loss_kWh': np.array(self.E_pipe_loss),
+            'T_at_source_inlet_C': np.array(self.T_at_source_inlet),
+            'T_after_source_C': np.array(self.T_after_source),
+            'T_return_to_tank_C': np.array(self.T_return_to_tank),
+            'Q_pipe_loss_1_kW': np.array(self.Q_pipe_loss_1),
+            'Q_pipe_loss_2_kW': np.array(self.Q_pipe_loss_2),
+            'Q_pipe_loss_3_kW': np.array(self.Q_pipe_loss_3),
         }
 
     def to_dataframe(self):
@@ -240,6 +297,14 @@ class SimulationResults:
             'Q_source (kW)': data['Q_source_kW'],
             'Q_loss (kW)': data['Q_loss_kW'],
             'E_loss (kWh)': data['E_loss_kWh'],
+            'Q_pipe_loss (kW)': data['Q_pipe_loss_kW'],
+            'E_pipe_loss (kWh)': data['E_pipe_loss_kWh'],
+            'T_at_source_inlet (C)': data['T_at_source_inlet_C'],
+            'T_after_source (C)': data['T_after_source_C'],
+            'T_return_to_tank (C)': data['T_return_to_tank_C'],
+            'Q_pipe_loss_1 (kW)': data['Q_pipe_loss_1_kW'],
+            'Q_pipe_loss_2 (kW)': data['Q_pipe_loss_2_kW'],
+            'Q_pipe_loss_3 (kW)': data['Q_pipe_loss_3_kW'],
         })
         return df
 
@@ -350,6 +415,28 @@ class PCMHeatExchangerSimulation:
             self._T_ambient = wl.T_ambient
         else:
             self._T_ambient = 25.0
+
+        # Pipe heat loss UA (closed-loop mode only)
+        self._pipe_UA_1 = 0.0
+        self._pipe_UA_2 = 0.0
+        self._pipe_UA_3 = 0.0
+        self._pipe_T_ambient = 25.0
+        if self.config.pipe_loss and self.config.pipe_loss.enabled:
+            pl = self.config.pipe_loss
+            self._pipe_T_ambient = pl.T_ambient
+            r_pipe = (pl.pipe_OD_mm / 2) / 1000           # pipe outer radius [m]
+            r_outer = r_pipe + pl.insulation_thickness_mm / 1000  # insulation outer radius [m]
+            for attr, L in [('_pipe_UA_1', pl.L_tank_to_source_m),
+                            ('_pipe_UA_2', pl.L_source_to_hex_m),
+                            ('_pipe_UA_3', pl.L_hex_to_tank_m)]:
+                if L <= 0:
+                    setattr(self, attr, 0.0)
+                    continue
+                R_ins = 0.0
+                if pl.insulation_thickness_mm > 0 and pl.k_insulation > 0:
+                    R_ins = np.log(r_outer / r_pipe) / (2 * np.pi * pl.k_insulation * L)
+                R_ext = 1.0 / (2 * np.pi * r_outer * L * pl.h_ext)
+                setattr(self, attr, 1.0 / (R_ins + R_ext))
 
     def _calculate_fin_parameters(self):
         """Calculate fin efficiency parameters"""
@@ -703,14 +790,33 @@ class PCMHeatExchangerSimulation:
                 else:
                     self.state.phase = Phase.MELTING
 
-    def _calculate_closed_loop_water_in(self, mode: SimulationMode) -> Tuple[float, float]:
+    def _apply_pipe_loss(self, T_fluid: float, UA: float) -> Tuple[float, float]:
+        """
+        Apply pipe heat loss to flowing fluid.
+
+        Returns:
+            (T_after_loss, Q_loss_W): Adjusted temperature and heat loss rate [W] (positive = heat lost)
+        """
+        if UA <= 0 or self.C_water <= 0:
+            return T_fluid, 0.0
+        Q_loss = UA * (T_fluid - self._pipe_T_ambient)   # W (positive when T_fluid > T_ambient)
+        dT = Q_loss / self.C_water
+        T_after = T_fluid - dT
+        return T_after, Q_loss
+
+    def _calculate_closed_loop_water_in(self, mode: SimulationMode) -> Tuple[float, float, float, float]:
         """
         Calculate water inlet temperature for heat source/sink closed-loop mode.
 
         Returns:
-            (T_after_source, Q_source_W): Water temp after source/sink and signed power [W]
+            (T_after_source, Q_source_W, Q_pipe1_W, T_at_source_inlet):
+            Water temp after source/sink, signed source power [W],
+            Pipe 1 heat loss [W], and temperature arriving at source inlet
         """
         cfg = self.operating.heat_source_config
+
+        # --- Pipe 1: Tank → Source/Sink (loss to ambient) ---
+        T_at_source_inlet, Q_pipe1 = self._apply_pipe_loss(self.state.T_tank, self._pipe_UA_1)
 
         # Determine sign: +1 = heat source (heating water), -1 = heat sink (cooling water)
         if mode == SimulationMode.CHARGING:
@@ -738,16 +844,16 @@ class PCMHeatExchangerSimulation:
         else:
             Q_source_W = max(Q_source_W, 0.0)
 
-        # Temperature after source/sink
+        # Temperature after source/sink (uses pipe-loss-adjusted inlet temp)
         if self.C_water > 0:
-            T_after_source = self.state.T_tank + Q_source_W / self.C_water
+            T_after_source = T_at_source_inlet + Q_source_W / self.C_water
         else:
-            T_after_source = self.state.T_tank
+            T_after_source = T_at_source_inlet
 
         # Clamp to physical range
         T_after_source = max(0.0, min(99.0, T_after_source))
 
-        return T_after_source, Q_source_W
+        return T_after_source, Q_source_W, Q_pipe1, T_at_source_inlet
 
     def _update_tank_temperature(self, T_water_out: float, dt: float):
         """
@@ -771,6 +877,7 @@ class PCMHeatExchangerSimulation:
             self.state.Q_fin = 0
             self.state.Q_tube = 0
             self.state.Q_source = 0
+            self.state.Q_pipe_loss = 0
             # Apply wall loss even in idle
             if Q_loss != 0.0:
                 dH = Q_loss * dt / 1000  # kJ
@@ -797,8 +904,15 @@ class PCMHeatExchangerSimulation:
                 self.state.curve = 'melting'
 
         # Select water inlet temperature based on water supply mode
+        Q_pipe_total = 0.0   # Total pipe heat loss this step [W]
+        Q_pipe1 = Q_pipe2 = Q_pipe3 = 0.0
         if self.operating.water_supply_mode == WaterSupplyMode.HEAT_SOURCE_SINK:
-            T_water_in, Q_source_W = self._calculate_closed_loop_water_in(mode)
+            T_after_source, Q_source_W, Q_pipe1, T_at_source_inlet = self._calculate_closed_loop_water_in(mode)
+
+            # --- Pipe 2: Source/Sink → HEX Cell (loss to ambient) ---
+            T_water_in, Q_pipe2 = self._apply_pipe_loss(T_after_source, self._pipe_UA_2)
+
+            Q_pipe_total = Q_pipe1 + Q_pipe2  # Pipe 3 added after HEX below
         else:
             # Constant temperature mode (existing behavior)
             Q_source_W = 0.0
@@ -878,7 +992,24 @@ class PCMHeatExchangerSimulation:
 
         # Update tank temperature in closed-loop mode
         if self.operating.water_supply_mode == WaterSupplyMode.HEAT_SOURCE_SINK:
-            self._update_tank_temperature(T_water_out, dt)
+            # --- Pipe 3: HEX Cell → Tank (loss to ambient) ---
+            T_return, Q_pipe3 = self._apply_pipe_loss(T_water_out, self._pipe_UA_3)
+            Q_pipe_total += Q_pipe3
+            self._update_tank_temperature(T_return, dt)
+
+            # Store loop temperature sensors
+            self.state.T_at_source_inlet = T_at_source_inlet
+            self.state.T_after_source = T_after_source
+            self.state.T_return_to_tank = T_return
+
+            # Store per-segment pipe losses
+            self.state.Q_pipe_loss_1 = Q_pipe1
+            self.state.Q_pipe_loss_2 = Q_pipe2
+            self.state.Q_pipe_loss_3 = Q_pipe3
+
+        # Store pipe loss
+        self.state.Q_pipe_loss = Q_pipe_total
+        self.state.E_pipe_loss += abs(Q_pipe_total) * dt / 1000  # kJ
 
         self.state.time += dt
 

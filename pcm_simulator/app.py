@@ -20,7 +20,8 @@ from simulation_core import (
     WaterSupplyMode,
     SourceControlMode,
     HeatSourceSinkConfig,
-    WallLossConfig
+    WallLossConfig,
+    PipeLossConfig
 )
 from visualization import (
     create_temperature_plot,
@@ -33,6 +34,9 @@ from visualization import (
     create_enthalpy_curve_plot,
     create_source_power_plot,
     create_wall_loss_plot,
+    create_loop_temperature_plot,
+    create_pipe_loss_plot,
+    create_system_schematic,
     export_data_to_csv
 )
 
@@ -550,6 +554,100 @@ def main():
                 f"Est. initial loss: ~{est_loss:.0f} W"
             )
 
+        # ----- Pipe Heat Loss (closed-loop mode only) -----
+        pipe_loss_config = None
+        if water_supply_mode == WaterSupplyMode.HEAT_SOURCE_SINK:
+            st.divider()
+            st.subheader("3c. Pipe Heat Loss")
+            pipe_loss_enabled = st.checkbox("Enable Pipe Heat Loss", value=False)
+
+            if pipe_loss_enabled:
+                pipe_T_ambient = st.number_input(
+                    "Pipe Ambient Temperature (°C)",
+                    value=25.0, min_value=-10.0, max_value=50.0, step=1.0,
+                    key="pipe_T_ambient"
+                )
+
+                pipe_OD = st.number_input(
+                    "Pipe OD (mm)", value=30.0, min_value=5.0, max_value=200.0, step=1.0
+                )
+
+                insulation_presets = {
+                    "Fiberglass": 0.04,
+                    "Closed-cell foam": 0.025,
+                    "Mineral wool": 0.038,
+                    "Rubber": 0.032,
+                    "None (bare pipe)": 0.0,
+                    "Custom": None,
+                }
+                insulation_material = st.selectbox(
+                    "Insulation Material",
+                    list(insulation_presets.keys()),
+                    index=0
+                )
+
+                if insulation_material == "Custom":
+                    k_ins = st.number_input(
+                        "Insulation Conductivity (W/m·K)",
+                        value=0.04, min_value=0.01, max_value=1.0, step=0.005, format="%.3f"
+                    )
+                elif insulation_material == "None (bare pipe)":
+                    k_ins = 0.04  # placeholder; thickness will be 0
+                else:
+                    k_ins = insulation_presets[insulation_material]
+
+                if insulation_material == "None (bare pipe)":
+                    ins_thickness = 0.0
+                else:
+                    ins_thickness = st.number_input(
+                        "Insulation Thickness (mm)",
+                        value=13.0, min_value=0.0, max_value=100.0, step=1.0
+                    )
+
+                st.markdown("**Pipe Segment Lengths**")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    L1 = st.number_input("Tank → Source (m)", value=20.0, min_value=0.0, max_value=500.0, step=1.0)
+                with col2:
+                    L2 = st.number_input("Source → Cell (m)", value=20.0, min_value=0.0, max_value=500.0, step=1.0)
+                with col3:
+                    L3 = st.number_input("Cell → Tank (m)", value=5.0, min_value=0.0, max_value=500.0, step=1.0)
+
+                pipe_loss_config = PipeLossConfig(
+                    enabled=True,
+                    T_ambient=pipe_T_ambient,
+                    pipe_OD_mm=pipe_OD,
+                    insulation_thickness_mm=ins_thickness,
+                    k_insulation=k_ins,
+                    h_ext=10.0,
+                    L_tank_to_source_m=L1,
+                    L_source_to_hex_m=L2,
+                    L_hex_to_tank_m=L3,
+                )
+
+                # Display estimated pipe UA
+                r_pipe = (pipe_OD / 2) / 1000
+                r_outer = r_pipe + ins_thickness / 1000
+                total_UA = 0.0
+                for L in [L1, L2, L3]:
+                    if L <= 0:
+                        continue
+                    R_ins = 0.0
+                    if ins_thickness > 0 and k_ins > 0:
+                        R_ins = np.log(r_outer / r_pipe) / (2 * np.pi * k_ins * L)
+                    R_ext = 1.0 / (2 * np.pi * r_outer * L * 10.0)
+                    total_UA += 1.0 / (R_ins + R_ext)
+
+                C_water_est = (Q_water / 60 * 1000 / 1000) * 4180  # ṁ·cp
+                if C_water_est > 0:
+                    est_dT = total_UA * abs(T_tank_initial - pipe_T_ambient) / C_water_est
+                else:
+                    est_dT = 0
+                st.caption(
+                    f"Total pipe UA: {total_UA:.1f} W/K | "
+                    f"Est. total ΔT: ~{est_dT:.1f} °C"
+                )
+
         st.divider()
 
         # ----- Simulation Settings -----
@@ -605,7 +703,8 @@ def main():
         t_max=t_max * 60,  # Convert to seconds
         T_pcm_initial=T_pcm_init,
         supercooling_deg=supercooling_deg,
-        wall_loss=wall_loss_config
+        wall_loss=wall_loss_config,
+        pipe_loss=pipe_loss_config
     )
 
     # System info columns
@@ -643,6 +742,13 @@ def main():
         st.metric("Latent Capacity", f"{E_latent:.2f} kWh")
     with col4:
         st.metric("Pressure Drop", f"{delta_P_kPa:.1f} kPa")
+
+    # System schematic
+    st.divider()
+    st.subheader("System Schematic")
+    fig_schematic = create_system_schematic(pcm, box, hex_geom, operating, m_pcm, E_latent,
+                                            pipe_loss_config=pipe_loss_config)
+    st.plotly_chart(fig_schematic, use_container_width=True)
 
     # Run simulation
     if run_clicked:
@@ -717,6 +823,10 @@ def main():
             final_E_loss = data['E_loss_kWh'][-1] if len(data['E_loss_kWh']) > 0 else 0
             st.metric("Cumulative Wall Loss", f"{final_E_loss:.3f} kWh")
 
+        if pipe_loss_config and pipe_loss_config.enabled:
+            final_E_pipe = data['E_pipe_loss_kWh'][-1] if len(data['E_pipe_loss_kWh']) > 0 else 0
+            st.metric("Cumulative Pipe Loss", f"{final_E_pipe:.3f} kWh")
+
         st.divider()
 
         # Plots
@@ -746,10 +856,14 @@ def main():
             # Individual plots in tabs
             tab_names = ["Temperature", "Power", "Energy", "Melt Fraction", "Front Position", "Enthalpy"]
             is_wall_loss = wall_loss_config and wall_loss_config.enabled
+            is_pipe_loss = pipe_loss_config and pipe_loss_config.enabled
             if is_wall_loss:
                 tab_names.append("Wall Loss")
             if is_source_sink:
                 tab_names.append("Source Power")
+                tab_names.append("Loop Temperatures")
+            if is_source_sink and is_pipe_loss:
+                tab_names.append("Pipe Loss")
 
             tabs = st.tabs(tab_names)
 
@@ -787,6 +901,17 @@ def main():
             if is_source_sink:
                 with tabs[next_tab]:
                     fig = create_source_power_plot(data)
+                    st.plotly_chart(fig, use_container_width=True)
+                next_tab += 1
+
+                with tabs[next_tab]:
+                    fig = create_loop_temperature_plot(data)
+                    st.plotly_chart(fig, use_container_width=True)
+                next_tab += 1
+
+            if is_source_sink and is_pipe_loss:
+                with tabs[next_tab]:
+                    fig = create_pipe_loss_plot(data)
                     st.plotly_chart(fig, use_container_width=True)
 
         st.divider()
