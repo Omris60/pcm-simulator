@@ -28,6 +28,7 @@ from visualization import (
     create_temperature_plot,
     create_power_plot,
     create_energy_plot,
+    create_capacity_plot,
     create_melt_fraction_plot,
     create_front_position_plot,
     create_enthalpy_plot,
@@ -450,6 +451,9 @@ def main():
 
         st.caption(f"HEX Area: {hex_geom.A_total:.1f} m2")
 
+        # Number of cells in parallel
+        n_cells = st.number_input("Number of Cells", value=1, min_value=1, max_value=100, step=1)
+
         st.divider()
 
         # ----- Operating Conditions -----
@@ -683,9 +687,23 @@ def main():
 
         col1, col2 = st.columns(2)
         with col1:
-            t_max = st.number_input("Max Time (min)", value=120, min_value=10, max_value=600)
+            time_unit = st.selectbox("Time Unit", ["Minutes", "Hours", "Days"], index=0)
         with col2:
-            dt = st.number_input("Time Step (s)", value=1.0, min_value=0.1, max_value=10.0)
+            if time_unit == "Minutes":
+                t_max_value = st.number_input("Max Time", value=120, min_value=1, step=10, key="t_max")
+            elif time_unit == "Hours":
+                t_max_value = st.number_input("Max Time", value=2.0, min_value=0.1, step=0.5, key="t_max")
+            else:  # Days
+                t_max_value = st.number_input("Max Time", value=1.0, min_value=0.1, step=0.5, key="t_max")
+
+        if time_unit == "Minutes":
+            t_max_seconds = t_max_value * 60
+        elif time_unit == "Hours":
+            t_max_seconds = t_max_value * 3600
+        else:
+            t_max_seconds = t_max_value * 86400
+
+        dt = st.number_input("Time Step (s)", value=1.0, min_value=0.1, max_value=600.0, step=1.0)
 
         supercooling_deg = st.number_input(
             "Supercooling (°C)",
@@ -716,16 +734,18 @@ def main():
 
     config = SimulationConfig(
         dt=dt,
-        t_max=t_max * 60,  # Convert to seconds
+        t_max=t_max_seconds,
         T_pcm_initial=T_pcm_init,
         supercooling_deg=supercooling_deg,
+        n_cells=n_cells,
         wall_loss=wall_loss_config,
         pipe_loss=pipe_loss_config,
         pump=pump_config
     )
 
     # System info columns
-    col1, col2, col3, col4 = st.columns(4)
+    n_info_cols = 5 if n_cells > 1 else 4
+    info_cols = st.columns(n_info_cols)
 
     # Calculate system parameters for display
     hex_volume = hex_geom.estimate_hex_volume()
@@ -751,14 +771,17 @@ def main():
     # Pressure drop [kPa]
     delta_P_kPa = f * (L_tube_total_m / D_in_m) * water.rho * (V_water ** 2) / 2 / 1000
 
-    with col1:
-        st.metric("PCM Mass", f"{m_pcm:.1f} kg")
-    with col2:
-        st.metric("PCM Volume", f"{V_pcm*1000:.1f} L")
-    with col3:
-        st.metric("Latent Capacity", f"{E_latent:.2f} kWh")
-    with col4:
+    with info_cols[0]:
+        st.metric("PCM Mass", f"{m_pcm:.1f} kg" if n_cells == 1 else f"{m_pcm:.1f} kg/cell")
+    with info_cols[1]:
+        st.metric("PCM Volume", f"{V_pcm*1000:.1f} L" if n_cells == 1 else f"{V_pcm*1000:.1f} L/cell")
+    with info_cols[2]:
+        st.metric("Latent Capacity", f"{E_latent:.2f} kWh" if n_cells == 1 else f"{E_latent:.2f} kWh/cell")
+    with info_cols[3]:
         st.metric("Pressure Drop", f"{delta_P_kPa:.1f} kPa")
+    if n_cells > 1:
+        with info_cols[4]:
+            st.metric("Array Total", f"{n_cells} cells / {E_latent * n_cells:.2f} kWh")
 
     # System schematic
     st.divider()
@@ -796,7 +819,7 @@ def main():
             elif sim_mode == "Discharging":
                 results, summary = sim.run_discharging()
             else:  # Full Cycle
-                results, summary = sim.run_full_cycle(t_max * 30, t_max * 30)  # Half time each
+                results, summary = sim.run_full_cycle(t_max_seconds / 2, t_max_seconds / 2)  # Half time each
 
             st.session_state.results = results
             st.session_state.summary = summary
@@ -810,6 +833,11 @@ def main():
         results = st.session_state.results
         summary = st.session_state.summary
         data = results.to_numpy()
+        if n_cells > 1:
+            data['n_cells'] = n_cells
+            data['Q_array_kW'] = data['Q_total_kW'] * n_cells
+            data['E_array_kWh'] = data['E_total_kWh'] * n_cells
+            data['capacity_array_kWh'] = data['capacity_kWh'] * n_cells
         is_source_sink = water_supply_mode == WaterSupplyMode.HEAT_SOURCE_SINK
 
         st.divider()
@@ -818,20 +846,40 @@ def main():
         st.subheader("Results Summary")
         col1, col2, col3, col4 = st.columns(4)
 
+        energy_label = "Energy (cell)" if n_cells > 1 else "Energy"
+        power_label = "Avg Power (cell)" if n_cells > 1 else "Avg Power"
+
         with col1:
             st.metric("Total Time", f"{summary.total_time_min:.1f} min")
         with col2:
-            st.metric("Energy", f"{summary.total_energy_kWh:.2f} kWh")
+            st.metric(energy_label, f"{summary.total_energy_kWh:.2f} kWh")
         with col3:
-            st.metric("Avg Power", f"{summary.average_power_kW:.2f} kW")
+            st.metric(power_label, f"{summary.average_power_kW:.2f} kW")
         with col4:
             st.metric("Final T_PCM", f"{summary.final_T_pcm:.1f} C")
+
+        if n_cells > 1:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Energy (array)", f"{summary.total_energy_kWh * n_cells:.2f} kWh")
+            with col2:
+                st.metric("Avg Power (array)", f"{summary.average_power_kW * n_cells:.2f} kW")
 
         col1, col2 = st.columns(2)
         with col1:
             st.metric("Final Phase", summary.final_phase)
         with col2:
             st.metric("Melt Fraction", f"{summary.final_melt_fraction*100:.0f}%")
+
+        initial_cap = data['capacity_kWh'][0] if len(data['capacity_kWh']) > 0 else 0
+        final_cap = data['capacity_kWh'][-1] if len(data['capacity_kWh']) > 0 else 0
+        cap_label_init = "Initial Capacity (cell)" if n_cells > 1 else "Initial Capacity"
+        cap_label_final = "Final Capacity (cell)" if n_cells > 1 else "Final Capacity"
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric(cap_label_init, f"{initial_cap:.3f} kWh")
+        with col2:
+            st.metric(cap_label_final, f"{final_cap:.3f} kWh")
 
         if is_source_sink:
             final_T_tank = data['T_tank_C'][-1] if len(data['T_tank_C']) > 0 else 0
@@ -876,7 +924,7 @@ def main():
             st.plotly_chart(fig, use_container_width=True)
         else:
             # Individual plots in tabs
-            tab_names = ["Temperature", "Power", "Energy", "Melt Fraction", "Front Position", "Enthalpy"]
+            tab_names = ["Temperature", "Power", "Energy", "Capacity", "Melt Fraction", "Front Position", "Enthalpy"]
             is_wall_loss = wall_loss_config and wall_loss_config.enabled
             is_pipe_loss = pipe_loss_config and pipe_loss_config.enabled
             if is_wall_loss:
@@ -902,18 +950,22 @@ def main():
                 st.plotly_chart(fig, use_container_width=True)
 
             with tabs[3]:
-                fig = create_melt_fraction_plot(data)
+                fig = create_capacity_plot(data)
                 st.plotly_chart(fig, use_container_width=True)
 
             with tabs[4]:
-                fig = create_front_position_plot(data, hex_geom.delta_max_fin * 1000)
+                fig = create_melt_fraction_plot(data)
                 st.plotly_chart(fig, use_container_width=True)
 
             with tabs[5]:
+                fig = create_front_position_plot(data, hex_geom.delta_max_fin * 1000)
+                st.plotly_chart(fig, use_container_width=True)
+
+            with tabs[6]:
                 fig = create_enthalpy_plot(data)
                 st.plotly_chart(fig, use_container_width=True)
 
-            next_tab = 6
+            next_tab = 7
             if is_wall_loss:
                 with tabs[next_tab]:
                     fig = create_wall_loss_plot(data)

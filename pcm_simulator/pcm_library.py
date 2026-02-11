@@ -254,18 +254,13 @@ def _create_RT5HC_enthalpy() -> EnthalpyData:
 def _create_RT10HC_enthalpy() -> EnthalpyData:
     """
     Create enthalpy data for RT10HC (cold storage PCM)
-    Melting range: ~8-12C, Latent heat: ~195 kJ/kg
+    Melting range: ~8-12C, Latent heat: ~209 kJ/kg
+    Based on Rubitherm datasheet enthalpy distribution.
     """
-    temperatures = np.array([4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], dtype=float)
+    temperatures = np.array([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], dtype=float)
 
-    # RT10HC peak around 10C
-    dH_melting_raw = np.array([2, 3, 6, 15, 40, 80, 75, 25, 8, 4, 3, 2], dtype=float)
-    scale_melting = 195 / np.sum(dH_melting_raw)
-    dH_melting = dH_melting_raw * scale_melting
-
-    dH_solidifying_raw = np.array([2, 4, 12, 35, 80, 70, 35, 12, 6, 4, 3, 2], dtype=float)
-    scale_solidifying = 195 / np.sum(dH_solidifying_raw)
-    dH_solidifying = dH_solidifying_raw * scale_solidifying
+    dH_melting = np.array([3, 3, 3, 4, 4, 6, 14, 100, 61, 3, 3, 0, 1, 2, 2], dtype=float)
+    dH_solidifying = np.array([3, 2, 2, 1, 1, 2, 4, 40, 145, 2, 2, 3, 2, 2, 2], dtype=float)
 
     return EnthalpyData(
         temperatures=temperatures,
@@ -294,14 +289,14 @@ class PCMMaterialLibrary:
         self._materials["SP50_gel"] = PCMMaterial(
             name="SP50_gel",
             category=PCMCategory.HOT,
-            melting_range=(44, 52),
+            melting_range=(42, 52),
             rho_solid=1500,
             rho_liquid=1400,
             k_solid=0.6,
             k_liquid=0.6,
             cp_sensible=2.0,
             enthalpy_data=_create_SP50_gel_enthalpy(),
-            description="Rubitherm SP50 gel, heat storage 44-52C"
+            description="Rubitherm SP50 gel, heat storage 42-52C"
         )
 
         # SP50 - Hot PCM (non-gel version)
@@ -322,28 +317,28 @@ class PCMMaterialLibrary:
         self._materials["RT5HC"] = PCMMaterial(
             name="RT5HC",
             category=PCMCategory.COLD,
-            melting_range=(5, 7),
+            melting_range=(2, 10),
             rho_solid=880,
             rho_liquid=770,
             k_solid=0.2,
             k_liquid=0.2,
             cp_sensible=2.0,
             enthalpy_data=_create_RT5HC_enthalpy(),
-            description="Rubitherm RT5HC, cold storage 5-7C (AC)"
+            description="Rubitherm RT5HC, cold storage 2-10C (AC)"
         )
 
         # RT10HC - Cold PCM for cold storage
         self._materials["RT10HC"] = PCMMaterial(
             name="RT10HC",
             category=PCMCategory.COLD,
-            melting_range=(8, 12),
+            melting_range=(7, 12),
             rho_solid=880,
             rho_liquid=770,
             k_solid=0.2,
             k_liquid=0.2,
             cp_sensible=2.0,
             enthalpy_data=_create_RT10HC_enthalpy(),
-            description="Rubitherm RT10HC, cold storage 8-12C"
+            description="Rubitherm RT10HC, cold storage 7-12C"
         )
 
     def get_material(self, name: str) -> PCMMaterial:
@@ -464,12 +459,6 @@ class PCMMaterialLibrary:
         }
 
 
-# Global library instance
-_library = None
-
 def get_library() -> PCMMaterialLibrary:
-    """Get the global PCM material library"""
-    global _library
-    if _library is None:
-        _library = PCMMaterialLibrary()
-    return _library
+    """Get the PCM material library"""
+    return PCMMaterialLibrary()

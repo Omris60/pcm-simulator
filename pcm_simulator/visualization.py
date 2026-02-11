@@ -78,11 +78,13 @@ def create_power_plot(data: Dict[str, np.ndarray],
     """Create power vs time plot"""
     fig = go.Figure()
 
+    is_array = 'Q_array_kW' in data
+
     fig.add_trace(go.Scatter(
         x=data['time_min'],
         y=np.abs(data['Q_total_kW']),
         mode='lines',
-        name='Q_total',
+        name='Q_total (cell)' if is_array else 'Q_total',
         line=dict(color='black', width=2)
     ))
 
@@ -101,6 +103,16 @@ def create_power_plot(data: Dict[str, np.ndarray],
         name='Q_tube',
         line=dict(color='purple', width=1.5, dash='dot')
     ))
+
+    # Array total trace (when n_cells > 1)
+    if is_array:
+        fig.add_trace(go.Scatter(
+            x=data['time_min'],
+            y=np.abs(data['Q_array_kW']),
+            mode='lines',
+            name=f"Q_total (array, {data['n_cells']} cells)",
+            line=dict(color='red', width=2.5)
+        ))
 
     # Wall heat loss trace (only when non-zero)
     if 'Q_loss_kW' in data and np.any(data['Q_loss_kW'] != 0):
@@ -128,20 +140,72 @@ def create_energy_plot(data: Dict[str, np.ndarray],
     """Create energy vs time plot"""
     fig = go.Figure()
 
+    is_array = 'E_array_kWh' in data
+
     fig.add_trace(go.Scatter(
         x=data['time_min'],
         y=data['E_total_kWh'],
         mode='lines',
-        name='Energy',
+        name='Energy (cell)' if is_array else 'Energy',
         line=dict(color='blue', width=2),
         fill='tozeroy',
         fillcolor='rgba(0, 100, 255, 0.2)'
     ))
 
+    # Array total trace (when n_cells > 1)
+    if is_array:
+        fig.add_trace(go.Scatter(
+            x=data['time_min'],
+            y=data['E_array_kWh'],
+            mode='lines',
+            name=f"Energy (array, {data['n_cells']} cells)",
+            line=dict(color='red', width=2.5),
+            fill='tozeroy',
+            fillcolor='rgba(255, 0, 0, 0.1)'
+        ))
+
     fig.update_layout(
         title=title,
         xaxis_title="Time (min)",
         yaxis_title="Energy (kWh)",
+        hovermode='x unified'
+    )
+
+    return fig
+
+
+def create_capacity_plot(data: Dict[str, np.ndarray],
+                        title: str = "Remaining Capacity vs Time") -> go.Figure:
+    """Create remaining thermal capacity vs time plot"""
+    fig = go.Figure()
+
+    is_array = 'capacity_array_kWh' in data
+
+    fig.add_trace(go.Scatter(
+        x=data['time_min'],
+        y=data['capacity_kWh'],
+        mode='lines',
+        name='Capacity (cell)' if is_array else 'Capacity',
+        line=dict(color='green', width=2),
+        fill='tozeroy',
+        fillcolor='rgba(0, 180, 0, 0.2)'
+    ))
+
+    if is_array:
+        fig.add_trace(go.Scatter(
+            x=data['time_min'],
+            y=data['capacity_array_kWh'],
+            mode='lines',
+            name=f"Capacity (array, {data['n_cells']} cells)",
+            line=dict(color='darkgreen', width=2.5),
+            fill='tozeroy',
+            fillcolor='rgba(0, 100, 0, 0.1)'
+        ))
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Time (min)",
+        yaxis_title="Capacity (kWh)",
         hovermode='x unified'
     )
 
@@ -582,6 +646,11 @@ def export_data_to_csv(data: Dict[str, np.ndarray]) -> str:
         columns['T_after_pump (C)'] = data['T_after_pump_C']
     if 'Q_pump_kW' in data and np.any(data['Q_pump_kW'] != 0):
         columns['Q_pump (kW)'] = data['Q_pump_kW']
+    # Remaining thermal capacity
+    if 'capacity_kWh' in data:
+        columns['Capacity (kWh)'] = data['capacity_kWh']
+    if 'capacity_array_kWh' in data:
+        columns['Capacity Array (kWh)'] = data['capacity_array_kWh']
     df = pd.DataFrame(columns)
     return df.to_csv(index=False)
 

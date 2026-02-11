@@ -123,6 +123,7 @@ class SimulationConfig:
     convergence_tol: float = 0.001     # Convergence tolerance
     max_iterations: int = 50           # Maximum iterations
     supercooling_deg: float = 0.0      # Degrees below T_liquidus before nucleation
+    n_cells: int = 1                   # Number of identical PCM cells in parallel
     wall_loss: Optional[WallLossConfig] = None
     pipe_loss: Optional[PipeLossConfig] = None
     pump: Optional[PumpConfig] = None
@@ -195,6 +196,9 @@ class SimulationState:
     H_supercool_start: float = 0.0    # Enthalpy when supercooling began [kJ/kg]
     T_supercool_start: float = 0.0    # Temperature when supercooling began [C]
 
+    # Remaining thermal capacity
+    capacity_kWh: float = 0.0         # Remaining thermal capacity [kWh]
+
 
 @dataclass
 class SimulationResults:
@@ -233,6 +237,9 @@ class SimulationResults:
     T_after_pump: List[float] = field(default_factory=list)
     Q_pump: List[float] = field(default_factory=list)
 
+    # Remaining thermal capacity
+    capacity_kWh: List[float] = field(default_factory=list)
+
     def record(self, state: SimulationState):
         """Record current state"""
         self.time.append(state.time)
@@ -262,6 +269,7 @@ class SimulationResults:
         self.Q_pipe_loss_3.append(state.Q_pipe_loss_3 / 1000)  # Convert to kW
         self.T_after_pump.append(state.T_after_pump)
         self.Q_pump.append(state.Q_pump / 1000)  # Convert to kW
+        self.capacity_kWh.append(state.capacity_kWh)
 
     def to_numpy(self) -> Dict[str, np.ndarray]:
         """Convert to numpy arrays"""
@@ -293,6 +301,7 @@ class SimulationResults:
             'Q_pipe_loss_3_kW': np.array(self.Q_pipe_loss_3),
             'T_after_pump_C': np.array(self.T_after_pump),
             'Q_pump_kW': np.array(self.Q_pump),
+            'capacity_kWh': np.array(self.capacity_kWh),
         }
 
     def to_dataframe(self):
@@ -400,11 +409,13 @@ class PCMHeatExchangerSimulation:
 
         # Water heat capacity rate
         self.C_water = self.m_dot_water * self.water.cp  # W/K
+        self.C_water_per_cell = self.C_water / self.config.n_cells  # W/K per cell
 
-        # Water-side heat transfer coefficient
+        # Water-side heat transfer coefficient (per-cell flow rate)
+        self.m_dot_water_per_cell = self.m_dot_water / self.config.n_cells  # kg/s per cell
         D_in_m = self.hex.D_in / 1000
         A_flow_m2 = self.hex.A_flow_m2
-        V_water = self.m_dot_water / (self.water.rho * A_flow_m2)
+        V_water = self.m_dot_water_per_cell / (self.water.rho * A_flow_m2)
         Re_water = self.water.rho * V_water * D_in_m / self.water.mu
 
         if Re_water < 2300:
@@ -442,6 +453,14 @@ class PCMHeatExchangerSimulation:
         self._pump_power_W = 0.0
         if self.config.pump and self.config.pump.enabled:
             self._pump_power_W = self.config.pump.power_W
+
+        # Capacity reference enthalpy (constant for given PCM)
+        if self.pcm.category == PCMCategory.HOT:
+            self._capacity_H_ref = self.pcm.enthalpy_data.get_cumulative_H(
+                self.pcm.T_solidus, 'solidifying')
+        else:
+            self._capacity_H_ref = self.pcm.enthalpy_data.get_cumulative_H(
+                self.pcm.T_liquidus, 'melting')
 
         # Pipe heat loss UA (closed-loop mode only)
         self._pipe_UA_1 = 0.0
@@ -513,6 +532,14 @@ class PCMHeatExchangerSimulation:
         self.delta_P_bar = self.delta_P_Pa / 100000
         self.friction_factor = f
 
+    def _calculate_capacity(self):
+        """Calculate remaining thermal capacity in kWh."""
+        if self.pcm.category == PCMCategory.HOT:
+            cap_specific = self.state.H_pcm_specific - self._capacity_H_ref
+        else:
+            cap_specific = self._capacity_H_ref - self.state.H_pcm_specific
+        self.state.capacity_kWh = max(0.0, cap_specific * self.m_pcm / 3600)
+
     def _initialize_state(self):
         """Initialize simulation state based on initial temperature"""
         T_init = self.config.T_pcm_initial
@@ -556,6 +583,9 @@ class PCMHeatExchangerSimulation:
         # Calculate initial enthalpy
         self.state.H_pcm_specific = self.pcm.enthalpy_data.get_cumulative_H(T_init, self.state.curve)
         self.state.H_pcm_total = self.state.H_pcm_specific * self.m_pcm
+
+        # Calculate initial capacity
+        self._calculate_capacity()
 
         # Initialize closed-loop water mode fields
         if self.operating.water_supply_mode == WaterSupplyMode.HEAT_SOURCE_SINK:
@@ -683,10 +713,10 @@ class PCMHeatExchangerSimulation:
         UA_tube = U_tube * self.hex.A_primary
         UA_total = UA_fin + UA_tube
 
-        NTU = UA_total / self.C_water if self.C_water > 0 else 0
+        NTU = UA_total / self.C_water_per_cell if self.C_water_per_cell > 0 else 0
         effectiveness = 1 - np.exp(-NTU) if NTU > 0 else 0
 
-        Q_max = self.C_water * abs(T_water_in - T_pcm)
+        Q_max = self.C_water_per_cell * abs(T_water_in - T_pcm)
         Q_total = effectiveness * Q_max
 
         if UA_total > 0:
@@ -695,8 +725,8 @@ class PCMHeatExchangerSimulation:
         else:
             Q_fin = Q_tube = 0
 
-        if self.C_water > 0:
-            T_water_out = T_water_in - Q_total / self.C_water * np.sign(T_water_in - T_pcm)
+        if self.C_water_per_cell > 0:
+            T_water_out = T_water_in - Q_total / self.C_water_per_cell * np.sign(T_water_in - T_pcm)
         else:
             T_water_out = T_pcm
 
@@ -925,6 +955,7 @@ class PCMHeatExchangerSimulation:
                 self.state.T_pcm = self.pcm.enthalpy_data.get_T_from_H(
                     self.state.H_pcm_specific, self.state.curve)
                 self._update_phase()
+            self._calculate_capacity()
             self.state.Q_loss = Q_loss
             self.state.E_loss += abs(Q_loss) * dt / 1000  # kJ
             self.state.time += dt
@@ -1021,6 +1052,9 @@ class PCMHeatExchangerSimulation:
 
         # Update phase
         self._update_phase()
+
+        # Update remaining capacity
+        self._calculate_capacity()
 
         # Store results
         self.state.Q_total = Q_total
